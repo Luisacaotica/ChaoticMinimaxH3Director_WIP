@@ -1,0 +1,38 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    name: Unit tests + static checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install test deps
+        run: pip install pytest
+
+      - name: Unit tests (pure layers — no GPU, no ComfyUI needed)
+        run: python -m pytest tests/ -q
+
+      - name: Python syntax check
+        run: python -m compileall -q .
+
+      - name: Verify the example workflow is structurally valid
+        run: python tools/verify_workflow.py
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: JS widget syntax check
+        run: node --check web/js/chaotic_director.js

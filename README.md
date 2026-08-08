@@ -7,6 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](pyproject.toml)
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-0.30%2B-4f5bd9.svg)]()
+[![CI](https://github.com/Luisacaotica/ChaoticMinimaxH3Director/actions/workflows/ci.yml/badge.svg)](https://github.com/Luisacaotica/ChaoticMinimaxH3Director/actions/workflows/ci.yml)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)]()
 
 *"Chaotic" is a nod to the wild local setup this was born on (nvfp4 pruned checkpoint, 4-step turbo LoRA, sage attention, custom sigma shift, chunk feed-forward). The node pack itself is the opposite of chaotic: it's the conductor that makes long-form H3 reliable on small VRAM.*
@@ -155,7 +156,18 @@ python -m pytest tests/ -q        # pure-layer unit tests (no GPU, no ComfyUI)
 python tools/build_workflow.py    # rebuild the example workflow
 python tools/verify_workflow.py   # validate it structurally
 python tools/smoke_check.py       # import + registration check under ComfyUI's python
+python tools/dry_run_engine.py    # (under ComfyUI's python) full conditioning-path dry run
 ```
+
+The **engine dry run** is the strongest verification short of a real render: it
+runs `ChunkRenderer.render_chunk` end-to-end against your *actual* installed
+`comfy` modules (stock `nodes_minimax_h3` helpers, `node_helpers`, `comfy.samplers`,
+`latent_preview`) with mocked model/clip/VAEs, and asserts the conditioning keys
+(`minimax_refs`, `minimax_keyframes`, `minimax_frame_count`), the keyframe
+payload shape (`resolved_frame_index`/`image`/`latent` — the exact contract
+`comfy/model_base.py` consumes), the `comfy.samplers.sample` call contract, and
+the `[F,H,W,3]` frames + `[1,C,L]` audio decode shapes. CI runs the unit tests,
+syntax checks and workflow verification on every push.
 
 **Layout**
 
