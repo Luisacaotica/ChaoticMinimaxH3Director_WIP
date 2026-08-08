@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Python 3.10+](https://img.shields.io/badge/Python-3.10+-blue.svg)](pyproject.toml)
 [![ComfyUI](https://img.shields.io/badge/ComfyUI-0.30%2B-4f5bd9.svg)]()
-[![CI](https://github.com/Luisacaotica/ChaoticMinimaxH3Director/actions/workflows/ci.yml/badge.svg)](https://github.com/Luisacaotica/ChaoticMinimaxH3Director/actions/workflows/ci.yml)
+[![CI](https://github.com/Luisacaotica/ChaoticMinimaxH3Director_WIP/actions/workflows/ci.yml/badge.svg)](https://github.com/Luisacaotica/ChaoticMinimaxH3Director_WIP/actions/workflows/ci.yml)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)]()
 
 *"Chaotic" is a nod to the wild local setup this was born on (nvfp4 pruned checkpoint, 4-step turbo LoRA, sage attention, custom sigma shift, chunk feed-forward). The node pack itself is the opposite of chaotic: it's the conductor that makes long-form H3 reliable on small VRAM.*
@@ -53,7 +53,7 @@ It is a **conductor, not an engine**: every model patch in your graph — turbo 
 
 ```bash
 cd ComfyUI/custom_nodes
-git clone https://github.com/Luisacaotica/ChaoticMinimaxH3Director.git
+git clone https://github.com/Luisacaotica/ChaoticMinimaxH3Director_WIP.git
 ```
 
 Restart ComfyUI. The nodes appear in the **`Chaotic/H3 Director`** menu and the timeline editor loads in the browser.
