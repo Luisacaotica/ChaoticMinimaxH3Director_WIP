@@ -35,24 +35,33 @@ jobs:
           node-version: "20"
 
       - name: JS widget syntax check
-        run: node --check web/js/chaotic_director.js
+        run: node --check web/js/chaotic_director.js && node --check web/js/chaotic_puppet.js
 
-      - name: JS widget smoke test (DOM-mocked constructor against a saved timeline)
-        run: node tools/widget_smoke.js
+      - name: JS widget smoke tests (DOM-mocked constructors against saved state)
+        run: node tools/widget_smoke.js && node tools/puppet_smoke.js
 
-      - name: JS widget — every this.X() call resolves to a class method
+      - name: JS widgets — every this.X() call resolves to a class method
         run: |
           python - <<'EOF'
           import re, sys
-          src = open('web/js/chaotic_director.js', encoding='utf-8').read()
-          start = src.index('class ChaoticDirectorEditor')
-          end = src.index('Extension registration')
-          cls = src[start:end]
-          methods = set(re.findall(r'^\s{2}(?:async\s+)?([A-Za-z_][A-Za-z0-9_]*)\(', cls, re.M))
-          calls = set(re.findall(r'\bthis\.([A-Za-z_][A-Za-z0-9_]*)\(', cls))
-          missing = sorted(c for c in calls if c not in methods)
-          if missing:
-              print('MISSING methods:', missing)
+          failures = []
+          def check_file(path, start_marker, end_marker, label):
+              src = open(path, encoding='utf-8').read()
+              start = src.index(start_marker)
+              end = src.index(end_marker)
+              cls = src[start:end]
+              methods = set(re.findall(r'^\s{2}(?:async\s+)?([A-Za-z_][A-Za-z0-9_]*)\(', cls, re.M))
+              calls = set(re.findall(r'\bthis\.([A-Za-z_][A-Za-z0-9_]*)\(', cls))
+              missing = sorted(c for c in calls if c not in methods)
+              if missing:
+                  failures.append(label + ': ' + ', '.join(missing))
+              else:
+                  print(label, '- all', len(calls), 'this.X() calls resolve')
+          check_file('web/js/chaotic_director.js', 'class ChaoticDirectorEditor', 'Extension registration', 'chaotic_director.js')
+          check_file('web/js/chaotic_puppet.js', 'class ChaoticPuppetEditor', 'Extension registration', 'chaotic_puppet.js')
+          if failures:
+              print('MISSING methods:')
+              for f in failures:
+                  print(' -', f)
               sys.exit(1)
-          print('all', len(calls), 'this.X() calls resolve to class methods')
           EOF

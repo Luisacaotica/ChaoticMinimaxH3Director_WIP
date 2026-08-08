@@ -49,6 +49,7 @@ It is a **conductor, not an engine**: every model patch in your graph — turbo 
 | 🎼 **Prompt formats** | Both verified H3 formats: the official field structure (`subject_definitions → summary → retention_analysis → detailed_description [Shot N]/MM:SS.sss → overall_soundscape → non_diegetic_music`) and the looser narrative scene-block format — switchable per project **and** per shot. |
 | 🎬 **Editing mode** | Character swap, restyle, motion/expression transfer, audio style transfer — import the clip being edited with a "source" role, distinct from reference/mood-donor clips. |
 | 📝 **Reference annotations** | Free-text notes per reference that flow into `subject_definitions:` (personality, voice, attributes the image doesn't show). |
+| 🎭 **Mockup Editor (puppet stage)** | A separate node: compose PNG sprites, text, and video clips as layers, keyframe their position/scale/rotation/opacity (opacity = reference strength), add cuts by when layers appear, and scrub with an audio track. Render the crude animation and wire it into the Director's `mockup` input — MiniMax H3 reads the composition, positions, and motion off the mockup and turns it into a finished clip. |
 | 🧪 **Zero-GPU prompt preview** | The companion `ChaoticH3PromptAssembler` node prints the exact per-chunk prompts + chunk plan without spending a single render. |
 
 ---
@@ -96,7 +97,20 @@ images      -> CreateVideo.images        audio -> CreateVideo.audio
 
 Outputs are `IMAGE` + `AUDIO` in the exact stock shape, so `CreateVideo` / `SaveVideo` / VHS consume them unchanged.
 
-### 3. Convert your existing workflow in one command
+### 3. Mockup Editor → storyboard → Director
+
+Open a **Chaotic H3 Mockup Editor** node (under `Chaotic/H3 Director`) to sketch the staging:
+
+1. **Import** background/character/prop PNGs (with transparency), videos, or add **text** layers.
+2. **Pose** them on the stage — layer order is front-to-back; drag a layer to move it (auto-keys), or set the playhead, press **Key**, and adjust X/Y/Scale/Rotation/Opacity in the inspector.
+3. Between keyframes the motion is interpolated; a layer is only visible between its first and last keyframe — that's how you make cuts and entrances.
+4. **Opacity is reference strength** — a 40% character literally shows the background through it, exactly like a weak `<Picture>` reference.
+5. Add an **audio track** to scrub while you animate.
+6. **Render** the mockup to frames, then wire its `IMAGE` output into the Director's optional **`mockup`** input.
+
+The Director then feeds every chunk its slice of the mockup as a `fully_preserved <Video N>` storyboard reference — H3 reproduces the layout, positions, layering, and motion as the blueprint for the final clip. It will look like a bad mockup — that's the point.
+
+### 4. Convert your existing workflow in one command
 
 `tools/build_workflow.py` rewires any **single-pass** H3 workflow into the Director graph — every loader/patch node kept byte-for-byte, discovery is link-driven (no hard-coded node ids):
 
@@ -187,7 +201,9 @@ stitching.py          seam de-dup + audio muxing
 vrma.py               VRAM probing, unload/clear cycle, auto chunk sizing
 engine.py             conditioning + I2VA keyframes + sampling + decode
 nodes.py              ComfyUI node classes
+mockup.py                Mockup Editor scene renderer (keyframes -> frames)
 web/js/chaotic_director.js   the timeline editor widget
+web/js/chaotic_puppet.js     the Mockup Editor stage widget
 tools/                workflow builder / verifier / smoke check
 workflows/            example workflow
 ```

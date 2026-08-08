@@ -158,6 +158,7 @@ class ChunkRefEntry:
     audio_tag: str = ""         # video-with-soundtrack's "<Audio j>"
     is_anchor: bool = False
     is_context: bool = False    # synthesized <Video N> of the previous chunk
+    is_storyboard: bool = False # synthesized <Video N> of the Mockup Editor blueprint
 
 
 @dataclass
@@ -170,6 +171,7 @@ class ChunkPlan:
     ref_entries: List[ChunkRefEntry]
     anchor_tag: Optional[str]
     issues: List[str] = field(default_factory=list)
+    storyboard_tag: Optional[str] = None  # set by attach_storyboard()
 
     @property
     def end_sec(self) -> float:
@@ -428,6 +430,25 @@ def _validate_plan(chunks: List[ChunkPlan], timeline: Timeline) -> None:
 # --------------------------------------------------------------------------- #
 # Global -> chunk-local tag map (for rewriting user-authored text)
 # --------------------------------------------------------------------------- #
+
+
+def attach_storyboard(plans: List[ChunkPlan]) -> List[ChunkPlan]:
+    """Append a synthesized storyboard <Video N> entry to every chunk.
+
+    Used by the Director when a Mockup Editor `mockup` feed is wired in: the
+    storyboard (the crude puppet animation) becomes a strong video reference
+    every chunk must interpret faithfully.  It has no file-backed Ref (the
+    frames come straight from the mockup node), so it is tagged after the
+    chunk's real video refs and never addressable from user text.
+    """
+    for plan in plans:
+        video_count = sum(1 for e in plan.ref_entries if e.kind == "video")
+        tag = f"<Video {video_count + 1}>"
+        plan.ref_entries.append(ChunkRefEntry(
+            ref=None, kind="video", tag=tag, is_storyboard=True,
+        ))
+        plan.storyboard_tag = tag
+    return plans
 
 
 def build_tag_map(

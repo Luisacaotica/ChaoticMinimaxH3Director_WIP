@@ -83,6 +83,7 @@ const CSS = `
 .chaotic-preview-stage{position:relative;background:#000;border:1px solid #1c1c1c;border-radius:5px;height:88px;overflow:hidden;display:flex;align-items:center;justify-content:center;flex:none}
 .chaotic-preview-stage video{max-width:100%;max-height:100%;display:none;background:#000}
 .chaotic-preview-stage img{max-width:100%;max-height:100%;display:none;object-fit:contain;background:#000}
+.chaotic-preview-stage canvas.chaotic-preview-wave{width:100%;height:88px;display:none;background:#000;border-radius:4px}
 .chaotic-preview-hint{color:#666;font-size:10px;text-align:center;padding:8px;line-height:1.5}
 .chaotic-preview-controls{display:flex;gap:6px;align-items:center;flex:none}
 .chaotic-preview-seek{flex:1;accent-color:#ff5a5a;height:4px}
@@ -852,13 +853,11 @@ class ChaoticDirectorEditor {
     ins.appendChild(fileRow);
 
     /* preview + placement */
-    if (ref.kind !== "audio") {
-      const prevRow = document.createElement("div");
-      prevRow.className = "chaotic-row";
-      const prevBtn = this.btn("▶ Preview", () => this.previewRef(ref.id));
-      prevRow.appendChild(prevBtn);
-      ins.appendChild(prevRow);
-    }
+    const prevRow = document.createElement("div");
+    prevRow.className = "chaotic-row";
+    const prevBtn = this.btn("▶ Preview", () => this.previewRef(ref.id));
+    prevRow.appendChild(prevBtn);
+    ins.appendChild(prevRow);
     const placeRow = document.createElement("div");
     placeRow.className = "chaotic-row";
     placeRow.innerHTML = '<span class="chaotic-label">Placement</span>';
@@ -1884,9 +1883,17 @@ class ChaoticDirectorEditor {
     this.previewImg.style.display = "none";
     this.previewHint = document.createElement("div");
     this.previewHint.className = "chaotic-preview-hint";
-    this.previewHint.textContent = "Drag on the ruler to scrub — the video / picture under the playhead appears here. Select a ref and press Preview to jump.";
+    this.previewHint.textContent = "Drag on the ruler to scrub — the video / picture / audio under the playhead appears here. Select a ref and press Preview to jump.";
+    this.previewWave = document.createElement("canvas");
+    this.previewWave.className = "chaotic-preview-wave";
+    this.previewAudio = document.createElement("audio");
+    this.previewAudio.addEventListener("timeupdate", () => this.onPreviewAudioTime());
+    this.previewAudio.addEventListener("play", () => this.previewPlayBtn.classList.add("playing"));
+    this.previewAudio.addEventListener("pause", () => this.previewPlayBtn.classList.remove("playing"));
+    this.previewAudio.addEventListener("loadedmetadata", () => this.onPreviewAudioMetadata());
     this.previewStage.appendChild(this.previewVideo);
     this.previewStage.appendChild(this.previewImg);
+    this.previewStage.appendChild(this.previewWave);
     this.previewStage.appendChild(this.previewHint);
     this.previewPanel.appendChild(this.previewStage);
 
@@ -1922,7 +1929,7 @@ class ChaoticDirectorEditor {
     for (let i = this.state.refs.length - 1; i >= 0; i--) {
       const ref = this.state.refs[i];
       if (!ref.timed) continue;
-      if (ref.kind !== "video" && ref.kind !== "picture" && ref.kind !== "subject") continue;
+      if (ref.kind !== "video" && ref.kind !== "picture" && ref.kind !== "subject" && ref.kind !== "audio") continue;
       if (sec >= ref.start - 1e-6 && sec < ref.start + ref.duration + 1e-6) return ref;
     }
     return null;
@@ -1934,8 +1941,10 @@ class ChaoticDirectorEditor {
     if (!ref) {
       this._previewRefId = null;
       if (this.previewVideo.src) this.previewVideo.pause();
+      if (this.previewAudio.src) this.previewAudio.pause();
       this.previewVideo.style.display = "none";
       this.previewImg.style.display = "none";
+      this.previewWave.style.display = "none";
       this.previewHint.style.display = "block";
       this.previewLabel.textContent = "";
       this.previewTime.textContent = "--:--.--- / --:--.---";
@@ -1974,12 +1983,36 @@ class ChaoticDirectorEditor {
       this._previewRefId = null; // stills have no video timeline — don't leave a stale play target
       this.previewVideo.pause();
       this.previewVideo.style.display = "none";
+      this.previewWave.style.display = "none";
       this.previewImg.style.display = "block";
       const src = ref.thumb || this.viewUrl(ref.file);
       if (this.previewImg.src !== src) this.previewImg.src = src;
       this.previewSeek.max = "0";
       this.previewSeek.value = "0";
       this.previewTime.textContent = "still frame";
+    } else if (ref.kind === "audio") {
+      this.previewVideo.pause();
+      this.previewVideo.style.display = "none";
+      this.previewImg.style.display = "none";
+      this.previewWave.style.display = "block";
+      this.previewWave.width = 360;
+      this.previewWave.height = 80;
+      this.drawWaveform(this.previewWave, ref.peaks || this.fakePeaks());
+      if (this._previewRefId !== ref.id) {
+        this._previewRefId = ref.id;
+        this.previewAudio.src = this.viewUrl(ref.file);
+        this.previewAudio.load();
+      }
+      const trimStart = Number(ref.trim_start) || 0;
+      const mediaEnd = ref.trim_end != null ? Number(ref.trim_end) : trimStart + ref.duration;
+      const target = trimStart + (sec - ref.start);
+      if (this.previewAudio.readyState >= 1) {
+        const clamped = clamp(target, trimStart, mediaEnd);
+        if (Math.abs(this.previewAudio.currentTime - clamped) > 0.05) this.previewAudio.currentTime = clamped;
+        this.previewSeek.max = Math.max(0, mediaEnd - trimStart);
+        this.previewSeek.value = String(clamp(clamped - trimStart, 0, mediaEnd - trimStart));
+        this.updatePreviewTime(clamped, mediaEnd);
+      }
     }
   }
 
@@ -2029,11 +2062,12 @@ class ChaoticDirectorEditor {
 
   onPreviewSeek() {
     const ref = this._previewRefId ? this.refById(this._previewRefId) : null;
-    if (!ref || ref.kind !== "video") return;
+    if (!ref) return;
     const trimStart = Number(ref.trim_start) || 0;
     const mediaEnd = ref.trim_end != null ? Number(ref.trim_end) : trimStart + ref.duration;
     const t = clamp(trimStart + Number(this.previewSeek.value || 0), trimStart, mediaEnd);
-    this.previewVideo.currentTime = t;
+    if (ref.kind === "video") this.previewVideo.currentTime = t;
+    else if (ref.kind === "audio") this.previewAudio.currentTime = t;
     if (ref.timed) {
       this.playhead = ref.start + (t - trimStart);
       this.renderTimeline();
@@ -2041,14 +2075,55 @@ class ChaoticDirectorEditor {
     this.updatePreviewTime(t, mediaEnd);
   }
 
+  onPreviewAudioTime() {
+    const ref = this._previewRefId ? this.refById(this._previewRefId) : null;
+    if (!ref || ref.kind !== "audio") return;
+    const trimStart = Number(ref.trim_start) || 0;
+    const mediaEnd = ref.trim_end != null ? Number(ref.trim_end) : trimStart + ref.duration;
+    if (this.previewAudio.currentTime >= mediaEnd - 0.04) {
+      this.previewAudio.pause();
+      this.previewAudio.currentTime = trimStart;
+      this.previewSeek.value = "0";
+      return;
+    }
+    if (ref.timed && !this.previewAudio.paused && (!this._drag || this._drag.mode !== "playhead")) {
+      this.playhead = ref.start + (this.previewAudio.currentTime - trimStart);
+      this.renderTimeline();
+    }
+    this.previewSeek.value = String(Math.max(0, this.previewAudio.currentTime - trimStart));
+    this.updatePreviewTime(this.previewAudio.currentTime, mediaEnd);
+  }
+
+  onPreviewAudioMetadata() {
+    const ref = this._previewRefId ? this.refById(this._previewRefId) : null;
+    if (!ref || ref.kind !== "audio") return;
+    const trimStart = Number(ref.trim_start) || 0;
+    const mediaEnd = ref.trim_end != null ? Number(ref.trim_end) : Math.min(trimStart + ref.duration, this.previewAudio.duration);
+    this.previewSeek.max = Math.max(0, mediaEnd - trimStart);
+    if (this.playhead != null && ref.timed) {
+      const target = clamp(trimStart + (this.playhead - ref.start), trimStart, mediaEnd);
+      this.previewAudio.currentTime = target;
+      this.previewSeek.value = String(Math.max(0, target - trimStart));
+      this.updatePreviewTime(target, mediaEnd);
+    }
+  }
+
   togglePreviewPlay() {
     if (!this._previewRefId) return;
     const ref = this.refById(this._previewRefId);
-    if (!ref || ref.kind !== "video") return;
-    if (this.previewVideo.paused) {
-      this.previewVideo.play().catch(() => {});
-    } else {
-      this.previewVideo.pause();
+    if (!ref) return;
+    if (ref.kind === "video") {
+      if (this.previewVideo.paused) {
+        this.previewVideo.play().catch(() => {});
+      } else {
+        this.previewVideo.pause();
+      }
+    } else if (ref.kind === "audio") {
+      if (this.previewAudio.paused) {
+        this.previewAudio.play().catch(() => {});
+      } else {
+        this.previewAudio.pause();
+      }
     }
   }
 
@@ -2057,11 +2132,26 @@ class ChaoticDirectorEditor {
     if (!ref) return;
     if (ref.timed) {
       this.setPlayhead(ref.start + 0.05);
+    } else if (ref.kind === "audio") {
+      /* library audio: preview standalone */
+      this._previewRefId = ref.id;
+      this.previewHint.style.display = "none";
+      this.previewImg.style.display = "none";
+      this.previewVideo.style.display = "none";
+      this.previewWave.style.display = "block";
+      this.previewWave.width = 360;
+      this.previewWave.height = 80;
+      this.drawWaveform(this.previewWave, ref.peaks || this.fakePeaks());
+      const url = this.viewUrl(ref.file);
+      if (url) { this.previewAudio.src = url; this.previewAudio.load(); }
+      const tags = this.globalTags();
+      this.previewLabel.textContent = (tags[ref.id] || "") + " · " + (ref.name || ref.file || "");
     } else {
       /* library video: preview standalone from its trim window */
       this._previewRefId = ref.id;
       this.previewHint.style.display = "none";
       this.previewImg.style.display = "none";
+      this.previewWave.style.display = "none";
       this.previewVideo.style.display = "block";
       const url = this.viewUrl(ref.file);
       if (url) {

@@ -303,6 +303,12 @@ def build_official_prompt(
                 "its exact content is explicitly NOT copied; only broad motion, "
                 "energy, and lighting carry over."
             )
+        elif entry.is_storyboard:
+            lines.append(
+                f"{entry.tag} is the storyboard mockup for this segment — its composition, "
+                "character positions, scale, layering, and motion are the authoritative "
+                "staging that this segment must realize faithfully."
+            )
         elif entry.ref is not None and entry.ref.kind in ("video", "audio") and not entry.ref.annotation:
             auto = _auto_subject_definition(entry, entry.tag)
             if auto and entry.tag not in user_defs:
@@ -351,6 +357,14 @@ def build_official_prompt(
                     f"{entry.tag} (appears in all shots of this segment): weak_reference - "
                     "carries motion, energy, and lighting from the previous segment; "
                     "explicitly not copied."
+                )
+            continue
+        if entry.is_storyboard:
+            if entry.tag not in covered_tags:
+                lines.append(
+                    f"{entry.tag} (appears in all shots of this segment): fully_preserved - "
+                    "reproduce the mockup's layout, positions, and motion exactly; "
+                    "it is the blueprint for this segment."
                 )
             continue
         if entry.tag in covered_tags:

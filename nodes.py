@@ -19,8 +19,14 @@ import json
 import comfy.samplers
 import nodes
 
-from .chunking import align_frame_count, build_tag_map, plan_chunks
+from .chunking import (
+    align_frame_count,
+    attach_storyboard,
+    build_tag_map,
+    plan_chunks,
+)
 from .engine import ChunkRenderer
+from .mockup import default_scene_json, parse_scene, render_scene
 from .prompt_assembly import assemble_chunk_prompt
 from .stitching import as_video_batch, stitch_chunks
 from .timeline import (
@@ -93,6 +99,16 @@ class ChaoticDirector:
             "optional": {
                 "sampler": ("SAMPLER",),
                 "sigmas": ("SIGMAS",),
+                "mockup": (
+                    "IMAGE",
+                    {
+                        "tooltip": (
+                            "Optional storyboard from the Chaotic H3 Mockup Editor ([1, F, H, W, 3] "
+                            "frames). When wired, every chunk gets its slice of the mockup as a "
+                            "fully_preserved <Video N> reference that H3 must interpret faithfully."
+                        ),
+                    },
+                ),
             },
         }
 
@@ -114,7 +130,7 @@ class ChaoticDirector:
         width, height, fps,
         chunk_mode, chunk_seconds, continuity, video_context, ref_image_size,
         timeline_data,
-        sampler=None, sigmas=None,
+        sampler=None, sigmas=None, mockup=None,
     ):
         fps = max(1, min(120, int(fps)))
         timeline = parse_timeline(timeline_data)
@@ -139,6 +155,27 @@ class ChaoticDirector:
             _log(f"fixed chunk sizing: {target_frames} frames (~{target_frames / fps:.2f}s)")
 
         plans = plan_chunks(timeline, target_frames, fps, continuity, video_context)
+        storyboard_feed = None
+        if mockup is not None:
+            if getattr(mockup, "ndim", 0) != 5:
+                raise ValueError(
+                    "Chaotic H3 Director: `mockup` must be the Mockup Editor's "
+                    "[1, F, H, W, 3] IMAGE output "
+                    f"(got shape {tuple(mockup.shape)})."
+                )
+            storyboard_feed = mockup[0].detach().cpu().float()  # [F, H, W, 3]
+            attach_storyboard(plans)
+            total_needed = sum(p.frames for p in plans)
+            if storyboard_feed.shape[0] < total_needed:
+                _log(
+                    f"WARNING: mockup has {storyboard_feed.shape[0]} frames but this render needs "
+                    f"{total_needed} — the final chunk(s) will render without the storyboard."
+                )
+            else:
+                _log(
+                    f"mockup storyboard wired: {len(plans)} chunks will interpret its "
+                    f"composition/motion (total {total_needed} frames used)."
+                )
         _log("planned chunks: " + ", ".join(
             f"#{p.index + 1} start={p.start_sec:.2f}s frames={p.frames}" for p in plans
         ))
@@ -168,6 +205,19 @@ class ChaoticDirector:
             try:
                 for plan_chunk in current_plans:
                     failed_start = plan_chunk.start_sec
+                    mockup_slice = None
+                    if storyboard_feed is not None:
+                        cum = sum(r["frames"].shape[0] for r in completed)
+                        if cum + plan_chunk.frames <= storyboard_feed.shape[0]:
+                            mockup_slice = storyboard_feed[cum:cum + plan_chunk.frames]
+                        else:
+                            # Mockup ran out: drop the storyboard entry for this
+                            # chunk so its prompt never references a video that
+                            # is not actually provided.
+                            plan_chunk.ref_entries = [
+                                e for e in plan_chunk.ref_entries if not e.is_storyboard
+                            ]
+                            plan_chunk.storyboard_tag = None
                     tag_map = build_tag_map(timeline, plan_chunk, global_tags)
                     bundle = assemble_chunk_prompt(
                         timeline, plan_chunk.index, plan_chunk.start_sec,
@@ -190,6 +240,7 @@ class ChaoticDirector:
                         plan_chunk, bundle.prompt, seed + plan_chunk.index,
                         anchor_image, prev_chunk_frames if video_context else None,
                         use_keyframe,
+                        storyboard_frames=mockup_slice,
                     )
                     peak = vrma.peak_allocated_bytes()
                     free, _ = vrma.probe_free_bytes()
@@ -225,6 +276,8 @@ class ChaoticDirector:
                 new_plans = plan_chunks(sub, new_target, fps, continuity, video_context)
                 for index, plan_chunk in enumerate(new_plans):
                     plan_chunk.index = len(completed) + index
+                if storyboard_feed is not None:
+                    attach_storyboard(new_plans)
                 current_plans = new_plans
 
         stitched = stitch_chunks(completed, fps, drop_seam)
@@ -249,6 +302,51 @@ class ChaoticDirector:
             json.dumps(report, ensure_ascii=False, indent=2),
             total_frames,
             len(chunk_prompts),
+        )
+
+
+class ChaoticH3MockupEditor:
+    """2.5D puppet stage: compose sprites/text/video layers, keyframe their
+    transforms over time, and render the animation to frames that the Director
+    consumes as a storyboard `mockup` — MiniMax H3 then interprets the mockup's
+    composition, positions, layering and motion as the authoritative staging.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "width": ("INT", {"default": 1344, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 64}),
+                "height": ("INT", {"default": 768, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 64}),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 120}),
+                "duration_sec": ("FLOAT", {"default": 6.0, "min": 0.5, "max": 120.0, "step": 0.5}),
+                "scene_data": (
+                    "STRING",
+                    {"default": default_scene_json(), "multiline": True, "hidden": True},
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "STRING", "INT")
+    RETURN_NAMES = ("images", "scene_json", "frame_count")
+    FUNCTION = "render"
+    CATEGORY = "Chaotic/H3 Director"
+    DESCRIPTION = (
+        "Mockup/puppet stage: layer PNG sprites, text, and video clips, keyframe "
+        "their position/scale/rotation/opacity over time, and render the crude "
+        "animation to frames. Wire the IMAGE output into the Director's `mockup` "
+        "input so MiniMax H3 interprets it as the storyboard for the final clip."
+    )
+
+    def render(self, width, height, fps, duration_sec, scene_data):
+        scene = parse_scene(scene_data)
+        frames, warnings = render_scene(scene, width, height, fps, duration_sec)
+        for warning in warnings:
+            _log("WARNING: " + warning)
+        return (
+            frames,              # [1, F, H, W, 3] — Director mockup convention
+            scene_data,
+            int(frames.shape[1]),
         )
 
 
@@ -325,10 +423,12 @@ class ChaoticPromptAssembler:
 
 NODE_CLASS_MAPPINGS = {
     "ChaoticH3Director": ChaoticDirector,
+    "ChaoticH3MockupEditor": ChaoticH3MockupEditor,
     "ChaoticH3PromptAssembler": ChaoticPromptAssembler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ChaoticH3Director": "Chaotic H3 Director (Timeline)",
+    "ChaoticH3MockupEditor": "Chaotic H3 Mockup Editor",
     "ChaoticH3PromptAssembler": "Chaotic H3 Prompt Assembler",
 }

@@ -304,6 +304,7 @@ class ChunkRenderer:
         anchor_image: Optional[torch.Tensor],
         video_context_frames: Optional[torch.Tensor],
         use_keyframe: bool = False,
+        storyboard_frames: Optional[torch.Tensor] = None,
     ) -> Dict:
         """Render one chunk; returns frames [F,H,W,3] + audio dict + log lines."""
         import comfy.model_management as mm  # noqa: PLC0415
@@ -327,6 +328,12 @@ class ChunkRenderer:
                 if anchor_image is not None and entry.kind == "picture":
                     item, block = self._encode_image_ref(anchor_image)
                     ref_items.append(item)
+                    ref_blocks.append(block)
+                continue
+            if entry.is_storyboard:
+                if storyboard_frames is not None and entry.kind == "video":
+                    ref_items_v, block = self._encode_video_ref(storyboard_frames, frame_count)
+                    ref_items.extend(ref_items_v)
                     ref_blocks.append(block)
                 continue
             if entry.ref is None:

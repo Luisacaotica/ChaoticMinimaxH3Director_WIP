@@ -90,7 +90,8 @@ def make_clip(captured):
     return SimpleNamespace(tokenize=tokenize, encode_from_tokens_scheduled=encode_from_tokens_scheduled)
 
 
-def run_case(name, plan, prompt, use_keyframe, anchor_image, with_picture_ref=False):
+def run_case(name, plan, prompt, use_keyframe, anchor_image, with_picture_ref=False,
+             with_storyboard=False):
     print(f"\n=== case: {name} ===")
     captured: dict = {}
     cond_capture: dict = {}
@@ -157,16 +158,26 @@ def run_case(name, plan, prompt, use_keyframe, anchor_image, with_picture_ref=Fa
                 _index=0,
             )
             ref_entries = [SimpleNamespace(
-                is_anchor=False, kind="picture", ref=ref, tag="<Picture 1>",
+                is_anchor=False, is_context=False, is_storyboard=False,
+                kind="picture", ref=ref, tag="<Picture 1>",
+                audio_tag=None,
+            )]
+        elif with_storyboard:
+            tmp_img = None
+            ref_entries = [SimpleNamespace(
+                is_anchor=False, is_context=False, is_storyboard=True,
+                kind="video", ref=None, tag="<Video 1>",
                 audio_tag=None,
             )]
         else:
             tmp_img = None
 
         plan = SimpleNamespace(frames=124, ref_entries=ref_entries, anchor_tag="<Picture 9>")
+        storyboard_frames = torch.rand(124, 64, 96, 3) if with_storyboard else None
         result = renderer.render_chunk(
             plan, "[Shot 1] A dry-run shot.", 42, anchor_image, None,
             use_keyframe=use_keyframe,
+            storyboard_frames=storyboard_frames,
         )
 
         # 1. helper contract: _empty_av_latent produced the expected frame count
@@ -197,6 +208,13 @@ def run_case(name, plan, prompt, use_keyframe, anchor_image, with_picture_ref=Fa
                       "'minimax_refs' block present with kind=image")
                 check(captured.get("ref_items") is not None and len(captured["ref_items"]) == 1,
                       "clip.tokenize received minimax_ref_items with the picture item")
+            if with_storyboard:
+                refs = payload.get("minimax_refs") or []
+                check(any(b.get("kind") in ("video", "video_audio") for b in refs),
+                      "'minimax_refs' block present with kind=video (storyboard)")
+                check(captured.get("ref_items") is not None
+                      and any(item.get("type") == "video" for item in captured["ref_items"]),
+                      "clip.tokenize received minimax_ref_items with the storyboard video item")
 
         # 3. sample() contract matches the stock SamplerCustomAdvanced path
         check("sampler" in sample_call and sample_call["sampler"] is sampler_obj,
@@ -227,6 +245,8 @@ def main() -> int:
              with_picture_ref=True)
     run_case("both: keyframe + picture ref", SimpleNamespace(), "[Shot 1] dry run", True, anchor,
              with_picture_ref=True)
+    run_case("storyboard mockup video ref", SimpleNamespace(), "[Shot 1] dry run", False, None,
+             with_storyboard=True)
 
     print(f"\n{CHECKS} checks, {len(FAILURES)} failures")
     if FAILURES:
