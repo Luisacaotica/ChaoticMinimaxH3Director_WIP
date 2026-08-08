@@ -130,6 +130,21 @@ def test_text_layer_renders_content():
     assert bright_frac < 0.5, f"text covers {bright_frac:.2%} of the frame"
 
 
+def test_aspect_round_trips_through_parse_and_default():
+    default = default_scene_dict()
+    assert default["aspect"] == "16:9"
+
+    parsed = parse_scene(json.dumps(default))
+    assert parsed["aspect"] == "16:9"
+
+    # A portrait scene from the widget keeps its aspect through parse.
+    scene = dict(default, aspect="9:16")
+    assert parse_scene(json.dumps(scene))["aspect"] == "9:16"
+
+    # Unknown/absent aspect falls back to landscape.
+    assert parse_scene("{}")["aspect"] == "16:9"
+
+
 def test_missing_assets_warn_not_crash():
     scene = _color_scene([
         {"id": "bad", "type": "image", "name": "missing", "file": "/nonexistent/x.png",

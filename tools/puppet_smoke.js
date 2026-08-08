@@ -146,6 +146,7 @@ if (!capturedExtension) {
 
 const savedScene = {
   version: 1,
+  aspect: "16:9",
   bg: { type: "color", color: [16, 18, 22] },
   layers: [
     { id: "layer_hero", type: "image", name: "Hero", file: "input/hero.png",
@@ -176,6 +177,8 @@ function check(name, cond, extra) {
       { name: "scene_data", value: JSON.stringify(savedScene) },
       { name: "fps", value: 24 },
       { name: "duration_sec", value: 6 },
+      { name: "width", value: 1280 },
+      { name: "height", value: 720 },
     ];
     this.addDOMWidget = (name, type, container, opts) => {
       this._container = container;
@@ -203,6 +206,40 @@ function check(name, cond, extra) {
   check("text layer kept content", ed.state.layers[1].type === "text" && ed.state.layers[1].text === "EPISODE 1");
   check("built stage canvas + ctx", !!ed.ctx);
   check("built key strip + layers panel + audio panel", !!(ed.keyCtx && ed.layersList && ed.audioWave));
+  check("default stage aspect is 16:9", Math.abs(ed.stageAspect() - 16 / 9) < 1e-6, "aspect=" + ed.stageAspect());
+
+  /* aspect-ratio presets */
+  let presetThrew = null;
+  try {
+    ed.applyAspectPreset("9:16");
+  } catch (e) { presetThrew = e; }
+  check("applyAspectPreset(9:16) does not throw", presetThrew === null, presetThrew ? presetThrew.message : "");
+  check("9:16 preset updates the render-size widgets", ed.widthWidget && ed.widthWidget.value === 720 && ed.heightWidget && ed.heightWidget.value === 1280,
+    "w=" + (ed.widthWidget && ed.widthWidget.value) + " h=" + (ed.heightWidget && ed.heightWidget.value));
+  check("stage aspect follows the 9:16 size", Math.abs(ed.stageAspect() - 720 / 1280) < 1e-6, "aspect=" + ed.stageAspect());
+  check("aspect serializes into the scene", JSON.parse(ed.serialize()).aspect === "9:16");
+  ed.applyAspectPreset("1:1");
+  check("1:1 preset sets square render size", ed.widthWidget.value === 1024 && ed.heightWidget.value === 1024);
+  check("square stage aspect", Math.abs(ed.stageAspect() - 1) < 1e-6, "aspect=" + ed.stageAspect());
+  /* custom size via the widget-edit callback path (what a user typing
+     width/height triggers in ComfyUI) */
+  let cbThrew = null;
+  try {
+    ed.widthWidget.value = 800;
+    ed.heightWidget.value = 1280;
+    ed.widthWidget.callback();
+  } catch (e) { cbThrew = e; }
+  check("widget callback path does not throw", cbThrew === null, cbThrew ? cbThrew.message : "");
+  check("manual width edit marks aspect custom", ed.stateAspectLabel() === "custom", "aspect=" + ed.stateAspectLabel());
+  check("custom stage aspect follows 800x1280", Math.abs(ed.stageAspect() - 800 / 1280) < 1e-6, "aspect=" + ed.stageAspect());
+  check("custom aspect serializes", JSON.parse(ed.serialize()).aspect === "custom");
+  ed.widthWidget.value = 720;
+  ed.heightWidget.value = 1280;
+  ed.widthWidget.callback();
+  check("typing exact preset dims re-labels 9:16", ed.stateAspectLabel() === "9:16", "aspect=" + ed.stateAspectLabel());
+  /* restore landscape for the rest of the harness */
+  ed.applyAspectPreset("16:9");
+  check("16:9 preset restores 1280x720", ed.widthWidget.value === 1280 && ed.heightWidget.value === 720);
 
   let stageThrew = null;
   try { ed.drawStage(); ed.drawKeyStrip(); ed.drawAudioWave(); } catch (e) { stageThrew = e; }
@@ -237,6 +274,8 @@ function check(name, cond, extra) {
         { name: "scene_data", value: "" },
         { name: "fps", value: 24 },
         { name: "duration_sec", value: 6 },
+        { name: "width", value: 1280 },
+        { name: "height", value: 720 },
       ];
       this.addDOMWidget = (name, type, container, opts) => ({ name, computeSize: null, getValue: opts.getValue, setValue: opts.setValue });
       this.setDirtyCanvas = () => {};
@@ -248,6 +287,8 @@ function check(name, cond, extra) {
     try { fresh.onNodeCreated(); } catch (e) { t2 = e; }
     check("fresh node constructs with empty scene", !!fresh._puppetEditor && t2 === null, t2 ? t2.message : "");
     check("fresh node has zero layers", fresh._puppetEditor.state.layers.length === 0);
+    check("fresh node defaults to 16:9 aspect", fresh._puppetEditor.stateAspectLabel() === "16:9");
+    check("fresh node stage aspect from widgets", Math.abs(fresh._puppetEditor.stageAspect() - 16 / 9) < 1e-6);
 
     console.log(failures === 0 ? "\nPUPPET SMOKE: ALL PASS" : "\nPUPPET SMOKE: " + failures + " FAILURE(S)");
     process.exit(failures === 0 ? 0 : 1);

@@ -59,6 +59,7 @@ def _as_str(value: Any, default: str = "") -> str:
 def default_scene_dict() -> Dict[str, Any]:
     return {
         "version": SCENE_VERSION,
+        "aspect": "16:9",
         "bg": {"type": "color", "color": [16, 18, 22]},
         "layers": [],
         "audio": {"file": "", "trim_start": 0.0, "trim_end": None},
@@ -132,6 +133,7 @@ def parse_scene(json_text: str) -> Dict[str, Any]:
 
     return {
         "version": SCENE_VERSION,
+        "aspect": _as_str(data.get("aspect"), "16:9"),
         "bg": bg,
         "layers": layers,
         "audio": {

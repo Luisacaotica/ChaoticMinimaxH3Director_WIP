@@ -49,7 +49,7 @@ It is a **conductor, not an engine**: every model patch in your graph — turbo 
 | 🎼 **Prompt formats** | Both verified H3 formats: the official field structure (`subject_definitions → summary → retention_analysis → detailed_description [Shot N]/MM:SS.sss → overall_soundscape → non_diegetic_music`) and the looser narrative scene-block format — switchable per project **and** per shot. |
 | 🎬 **Editing mode** | Character swap, restyle, motion/expression transfer, audio style transfer — import the clip being edited with a "source" role, distinct from reference/mood-donor clips. |
 | 📝 **Reference annotations** | Free-text notes per reference that flow into `subject_definitions:` (personality, voice, attributes the image doesn't show). |
-| 🎭 **Mockup Editor (puppet stage)** | A separate node: compose PNG sprites, text, and video clips as layers, keyframe their position/scale/rotation/opacity (opacity = reference strength), add cuts by when layers appear, and scrub with an audio track. Render the crude animation and wire it into the Director's `mockup` input — MiniMax H3 reads the composition, positions, and motion off the mockup and turns it into a finished clip. |
+| 🎭 **Mockup Editor (puppet stage)** | A separate node: compose PNG sprites, text, and video clips as layers, keyframe their position/scale/rotation/opacity (opacity = reference strength), add cuts by when layers appear, and scrub with an audio track. One-click **aspect presets** (16:9 / 9:16 / 1:1) set the stage and the render size to match the target format — portrait phone clips or square social posts compose exactly as they'll render. Render the crude animation and wire it into the Director's `mockup` input — MiniMax H3 reads the composition, positions, and motion off the mockup and turns it into a finished clip. |
 | 🧪 **Zero-GPU prompt preview** | The companion `ChaoticH3PromptAssembler` node prints the exact per-chunk prompts + chunk plan without spending a single render. |
 
 ---
@@ -101,6 +101,7 @@ Outputs are `IMAGE` + `AUDIO` in the exact stock shape, so `CreateVideo` / `Save
 
 Open a **Chaotic H3 Mockup Editor** node (under `Chaotic/H3 Director`) to sketch the staging:
 
+0. **Match the target format** — click an **Aspect** preset in the toolbar (`16:9` / `9:16` / `1:1`): it reshapes the stage *and* sets the render `width`/`height` widgets to that format, so a phone-vertical video (9:16) or square post composes exactly as it will render. Edit the `width`/`height` widgets freely for a custom aspect — the stage follows. The aspect is saved with the scene and with the project file.
 1. **Import** background/character/prop PNGs (with transparency), videos, or add **text** layers.
 2. **Pose** them on the stage — layer order is front-to-back; drag a layer to move it (auto-keys), or set the playhead, press **Key**, and adjust X/Y/Scale/Rotation/Opacity in the inspector.
 3. Between keyframes the motion is interpolated; a layer is only visible between its first and last keyframe — that's how you make cuts and entrances.

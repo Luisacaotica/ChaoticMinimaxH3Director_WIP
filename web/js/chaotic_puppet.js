@@ -23,7 +23,12 @@ const { api } = window.comfyAPI.api;
 /* ------------------------------------------------------------------ */
 /* Constants                                                          */
 /* ------------------------------------------------------------------ */
-const STAGE_ASPECT = 16 / 9;
+const STAGE_ASPECT = 16 / 9;  // fallback when the render-size widgets are unavailable
+const ASPECT_PRESETS = [
+  ["16:9", 1280, 720],
+  ["9:16", 720, 1280],
+  ["1:1", 1024, 1024],
+];
 const KEYSTRIP_H = 26;
 const AUDIO_H = 84;
 
@@ -143,7 +148,12 @@ class ChaoticPuppetEditor {
     this.sceneDataWidget = node.widgets.find(w => w.name === "scene_data");
     this.fpsWidget = node.widgets.find(w => w.name === "fps");
     this.durationWidget = node.widgets.find(w => w.name === "duration_sec");
+    this.widthWidget = node.widgets.find(w => w.name === "width");
+    this.heightWidget = node.widgets.find(w => w.name === "height");
+    this.aspectBtns = {};
+    this.aspectDims = null;
 
+    this.wireSizeWidgets();
     this.loadState();
     this.buildDOM();
     this._raf = requestAnimationFrame(() => this.checkResize());
@@ -159,7 +169,7 @@ class ChaoticPuppetEditor {
   }
 
   defaultScene() {
-    return { bg: { type: "color", color: [16, 18, 22] }, layers: [], audio: { file: "", trim_start: 0, trim_end: null } };
+    return { aspect: "16:9", bg: { type: "color", color: [16, 18, 22] }, layers: [], audio: { file: "", trim_start: 0, trim_end: null } };
   }
 
   loadState() {
@@ -169,14 +179,29 @@ class ChaoticPuppetEditor {
     this._applyState(data);
   }
 
-  _applyState(raw) {
+  _applyState(raw, opts) {
+    const applySize = !!(opts && opts.applySize);
+    const rawAspect = (raw && typeof raw.aspect === "string") ? raw.aspect : "";
+    const knownPreset = ASPECT_PRESETS.some(([id]) => id === rawAspect);
     this.state = {
+      aspect: knownPreset ? rawAspect : (rawAspect || "16:9"),
       bg: (raw.bg && typeof raw.bg === "object") ? raw.bg : { type: "color", color: [16, 18, 22] },
       layers: Array.isArray(raw.layers) ? raw.layers.map((l, i) => this.normalizeLayer(l, i)) : [],
       audio: (raw.audio && typeof raw.audio === "object")
         ? { file: raw.audio.file || "", trim_start: Number(raw.audio.trim_start) || 0, trim_end: raw.audio.trim_end == null ? null : Number(raw.audio.trim_end) }
         : { file: "", trim_start: 0, trim_end: null },
     };
+    /* Only a project file that actually DECLARES a preset aspect restores the
+       preset's render size. A plain node load — or an old project saved before
+       this feature (no `aspect` field) — leaves the width/height widgets alone,
+       so manual/legacy sizes survive untouched. */
+    if (applySize && knownPreset) {
+      const preset = ASPECT_PRESETS.find(([id]) => id === rawAspect);
+      if (preset && this.widthWidget && this.heightWidget) {
+        this.widthWidget.value = preset[1];
+        this.heightWidget.value = preset[2];
+      }
+    }
     this._imgCache = {};
     this._videoEls = {};
     this._peaks = null;
@@ -219,6 +244,7 @@ class ChaoticPuppetEditor {
   serialize() {
     return JSON.stringify({
       version: 1,
+      aspect: this.stateAspectLabel(),
       bg: this.state.bg,
       layers: this.state.layers.map(l => ({
         id: l.id, type: l.type, name: l.name, file: l.file, fit: l.fit,
@@ -239,6 +265,71 @@ class ChaoticPuppetEditor {
   }
 
   layerById(id) { return this.state.layers.find(l => l.id === id); }
+
+  /* ---------------- aspect / stage size ---------------- */
+  wireSizeWidgets() {
+    [this.widthWidget, this.heightWidget].forEach(w => {
+      if (!w) return;
+      const prev = w.callback;
+      w.callback = function () {
+        this.onRenderSizeChanged();
+        if (typeof prev === "function") prev.apply(this, arguments);
+      }.bind(this);
+    });
+  }
+
+  stateAspectLabel() { return this.state.aspect || "16:9"; }
+
+  stageAspect() {
+    const w = this.widthWidget ? parseInt(this.widthWidget.value, 10) : 0;
+    const h = this.heightWidget ? parseInt(this.heightWidget.value, 10) : 0;
+    if (w > 0 && h > 0) return w / h;
+    return STAGE_ASPECT;
+  }
+
+  applyAspectPreset(id) {
+    const preset = ASPECT_PRESETS.find(([pid]) => pid === id);
+    if (!preset) return;
+    this.state.aspect = id;
+    if (this.widthWidget) this.widthWidget.value = preset[1];
+    if (this.heightWidget) this.heightWidget.value = preset[2];
+    this.commitChanges();
+    this.refreshAspectButtons();
+    this._lastWidth = 0; // force the stage to reshape to the new aspect
+    this.checkResize();
+    this.recomputeSize();
+    this.updateStatus(`Stage aspect set to ${id} (${preset[1]}×${preset[2]}) — layers keep their normalized positions.`);
+  }
+
+  onRenderSizeChanged() {
+    const w = this.widthWidget ? parseInt(this.widthWidget.value, 10) : 0;
+    const h = this.heightWidget ? parseInt(this.heightWidget.value, 10) : 0;
+    /* Typing exact preset dimensions re-labels the preset; anything else is custom. */
+    const match = ASPECT_PRESETS.find(([id, pw, ph]) => w === pw && h === ph);
+    this.state.aspect = match ? match[0] : "custom";
+    this.refreshAspectButtons();
+    this._lastWidth = 0;
+    this.checkResize();
+    this.recomputeSize();
+    const label = match ? match[0] : `Custom ${w}×${h}`;
+    this.updateStatus(`${label} — the stage follows the width/height widgets.`);
+    this.commitChanges();
+  }
+
+  refreshAspectButtons() {
+    const label = this.stateAspectLabel();
+    Object.keys(this.aspectBtns).forEach(id => {
+      this.aspectBtns[id].classList.toggle("active", id === label);
+    });
+    this.updateAspectDims();
+  }
+
+  updateAspectDims() {
+    if (!this.aspectDims) return;
+    const w = this.widthWidget ? this.widthWidget.value : "?";
+    const h = this.heightWidget ? this.heightWidget.value : "?";
+    this.aspectDims.textContent = `${this.stateAspectLabel()} · ${w}×${h}`;
+  }
 
   viewUrl(file) {
     if (!file) return "";
@@ -303,8 +394,24 @@ class ChaoticPuppetEditor {
     const btnKey = this.btn("Key", () => this.addKeyAtPlayhead());
     const btnDelKey = this.btn("Del Key", () => this.delKeyAtPlayhead());
     const btnBg = this.btn("Bg", () => this.pickBackground());
+    const aspectLab = document.createElement("span");
+    aspectLab.className = "pup-label";
+    aspectLab.textContent = "Aspect";
+    const aspectBtns = ASPECT_PRESETS.map(([id, pw, ph]) => {
+      const b = this.btn(id, () => this.applyAspectPreset(id));
+      b.className = "pup-btn";
+      b.title = `${id} → ${pw}×${ph}`;
+      this.aspectBtns[id] = b;
+      return b;
+    });
+    const aspectDims = document.createElement("span");
+    aspectDims.className = "pup-label";
+    aspectDims.style.fontFamily = "ui-monospace,Menlo,monospace";
+    aspectDims.style.color = "#7ea0b8";
+    aspectDims.textContent = "";
+    this.aspectDims = aspectDims;
     const btnClear = this.btn("✕ Layers", () => { this.state.layers = []; this.selectedId = null; this.commitChanges(); this.buildInspector(); });
-    toolbar.append(btnImg, btnVid, btnText, btnBg, btnKey, btnDelKey, btnPlay, btnSave, btnLoad, btnClear);
+    toolbar.append(btnImg, btnVid, btnText, btnBg, aspectLab, ...aspectBtns, aspectDims, btnKey, btnDelKey, btnPlay, btnSave, btnLoad, btnClear);
     this.wrapper.appendChild(toolbar);
 
     /* stage */
@@ -453,6 +560,7 @@ class ChaoticPuppetEditor {
     this.drawStage();
     this.drawKeyStrip();
     this.buildAudioPanel();
+    this.refreshAspectButtons();
     this.updateStatus("Compose layers on the stage. Select a layer, move the playhead, press Key, then drag/move to animate. Wire the IMAGE output into the Director's mockup input.");
   }
 
@@ -482,10 +590,11 @@ class ChaoticPuppetEditor {
     if (w > 0 && (w !== this._lastWidth || scale !== this._lastScale)) {
       this._lastWidth = w;
       this._lastScale = scale;
-      const h = Math.max(60, Math.round((w * scale) / STAGE_ASPECT));
+      const aspect = this.stageAspect();
+      const h = Math.max(60, Math.round((w * scale) / aspect));
       this.canvas.width = Math.round(w * scale);
       this.canvas.height = h;
-      this.canvas.style.height = (w / STAGE_ASPECT) + "px";
+      this.canvas.style.height = (w / aspect) + "px";
       this.ctx.setTransform(scale, 0, 0, scale, 0, 0);
       const kw = this.keyCanvas.clientWidth || w;
       this.keyCanvas.width = Math.round(kw * scale);
@@ -507,7 +616,7 @@ class ChaoticPuppetEditor {
   /* ---------------- stage drawing ---------------- */
   stageSize() {
     const w = this.canvas ? this.canvas.clientWidth : 800;
-    return [Math.max(120, w), Math.max(67, w / STAGE_ASPECT)];
+    return [Math.max(120, w), Math.max(67, w / this.stageAspect())];
   }
 
   drawStage() {
@@ -1344,11 +1453,15 @@ class ChaoticPuppetEditor {
         if (raw.fps && this.fpsWidget) this.fpsWidget.value = parseInt(raw.fps, 10) || 24;
         if (raw.duration_sec) this.durationSec = parseFloat(raw.duration_sec) || 6;
         this.selectedId = null;
-        this._applyState(raw);
+        this._applyState(raw, { applySize: true });
         this.refreshLayerList();
         this.buildInspector();
         this.buildAudioPanel();
         this.commitChanges();
+        this.refreshAspectButtons();
+        this._lastWidth = 0;
+        this.checkResize();
+        this.recomputeSize();
         this.updateStatus("Mockup project loaded.");
       } catch (err) {
         this.updateStatus("Load failed: " + (err && err.message ? err.message : err));
@@ -1411,7 +1524,10 @@ app.registerExtension({
       widget.computeSize = function () {
         const width = Math.max(700, (self.size && self.size[0]) || 1100);
         const inspectorH = self._puppetEditor && self._puppetEditor.inspector.style.display !== "none" ? 330 : 0;
-        return [Math.max(10, width - 24), Math.round(width / STAGE_ASPECT) + 220 + inspectorH];
+        const aspect = (self._puppetEditor && typeof self._puppetEditor.stageAspect === "function")
+          ? self._puppetEditor.stageAspect()
+          : STAGE_ASPECT;
+        return [Math.max(10, width - 24), Math.round(width / aspect) + 220 + inspectorH];
       };
 
       setTimeout(() => {

@@ -316,8 +316,8 @@ class ChaoticH3MockupEditor:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "width": ("INT", {"default": 1344, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 64}),
-                "height": ("INT", {"default": 768, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 64}),
+                "width": ("INT", {"default": 1280, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 64}),
+                "height": ("INT", {"default": 720, "min": 64, "max": nodes.MAX_RESOLUTION, "step": 64}),
                 "fps": ("INT", {"default": 24, "min": 1, "max": 120}),
                 "duration_sec": ("FLOAT", {"default": 6.0, "min": 0.5, "max": 120.0, "step": 0.5}),
                 "scene_data": (
