@@ -36,3 +36,23 @@ jobs:
 
       - name: JS widget syntax check
         run: node --check web/js/chaotic_director.js
+
+      - name: JS widget smoke test (DOM-mocked constructor against a saved timeline)
+        run: node tools/widget_smoke.js
+
+      - name: JS widget — every this.X() call resolves to a class method
+        run: |
+          python - <<'EOF'
+          import re, sys
+          src = open('web/js/chaotic_director.js', encoding='utf-8').read()
+          start = src.index('class ChaoticDirectorEditor')
+          end = src.index('Extension registration')
+          cls = src[start:end]
+          methods = set(re.findall(r'^\s{2}(?:async\s+)?([A-Za-z_][A-Za-z0-9_]*)\(', cls, re.M))
+          calls = set(re.findall(r'\bthis\.([A-Za-z_][A-Za-z0-9_]*)\(', cls))
+          missing = sorted(c for c in calls if c not in methods)
+          if missing:
+              print('MISSING methods:', missing)
+              sys.exit(1)
+          print('all', len(calls), 'this.X() calls resolve to class methods')
+          EOF

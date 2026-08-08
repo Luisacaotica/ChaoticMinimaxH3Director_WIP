@@ -246,6 +246,25 @@ class ChaoticDirectorEditor {
     return Math.max(5, Math.ceil(end));
   }
 
+  loadShotThumbs(shot) {
+    /* Shots are text blocks — no thumbnail to reload. */
+  }
+
+  loadRefThumb(ref) {
+    /* Rebuild a thumbnail for a saved picture/subject ref from its input path. */
+    if (!ref || !ref.file || ref.kind === "audio" || ref.kind === "video") return;
+    const parts = ref.file.split("/");
+    const filename = parts[parts.length - 1];
+    const subfolder = parts.slice(0, -1).join("/");
+    if (!filename) return;
+    try {
+      const url = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}`);
+      const img = new Image();
+      img.onload = () => { ref.thumb = url; this.renderTimeline(); };
+      img.src = url;
+    } catch (e) { /* keep null thumb */ }
+  }
+
   /* ---------------- serialization ---------------- */
   serialize() {
     return JSON.stringify({
