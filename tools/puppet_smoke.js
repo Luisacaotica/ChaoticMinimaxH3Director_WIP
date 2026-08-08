@@ -204,6 +204,7 @@ function check(name, cond, extra) {
   check("loaded 2 saved layers", ed.state.layers.length === 2, "layers=" + ed.state.layers.length);
   check("keyframes sorted by time", ed.state.layers[0].keys[0].t === 0 && ed.state.layers[0].keys[1].t === 2);
   check("text layer kept content", ed.state.layers[1].type === "text" && ed.state.layers[1].text === "EPISODE 1");
+  check("loaded keys default to linear ease", ed.state.layers[0].keys.every(k => k.ease === "linear"));
   check("built stage canvas + ctx", !!ed.ctx);
   check("built key strip + layers panel + audio panel", !!(ed.keyCtx && ed.layersList && ed.audioWave));
   check("default stage aspect is 16:9", Math.abs(ed.stageAspect() - 16 / 9) < 1e-6, "aspect=" + ed.stageAspect());
@@ -265,6 +266,27 @@ function check(name, cond, extra) {
   check("serialize round-trips layers", serialized.layers.length === 2);
   check("serialize round-trips keys", serialized.layers[0].keys.length === 2);
   check("serialize keeps bg + audio", serialized.bg.type === "color" && serialized.audio.file === "");
+
+  /* easing modes (module helpers + key strip + inspector dropdown) */
+  const hero = ed.layerById("layer_hero");
+  const p0 = hero.keys.find(k => Math.abs(k.t) < 0.02);
+  const pAt = sandbox.propsAt;
+  p0.ease = "out";
+  check("serialize carries ease", JSON.parse(ed.serialize()).layers[0].keys[0].ease === "out");
+  check("ease-out midpoint > linear (fast start)", pAt(hero, 1.0).x > 0.5, "x=" + pAt(hero, 1.0).x.toFixed(3));
+  p0.ease = "hold";
+  check("hold stays at key A mid-segment", Math.abs(pAt(hero, 1.0).x - 0.3) < 1e-6, "x=" + pAt(hero, 1.0).x);
+  check("hold jumps to key B at its time", Math.abs(pAt(hero, 2.0).x - 0.7) < 1e-6, "x=" + pAt(hero, 2.0).x);
+  p0.ease = "in";
+  check("ease-in midpoint < linear", pAt(hero, 1.0).x < 0.5, "x=" + pAt(hero, 1.0).x.toFixed(3));
+  p0.ease = "linear";
+  check("key strip redraw with eased keys does not throw", (() => { ed.drawKeyStrip(); return true; })());
+  ed.selectedId = "layer_hero";
+  ed.playhead = 0.0;
+  let inspThrew = null;
+  try { ed.buildInspector(); } catch (e) { inspThrew = e; }
+  check("inspector builds with the ease dropdown", inspThrew === null, inspThrew ? inspThrew.message : "");
+  ed.selectedId = null;
 
   /* fresh node path */
   (async () => {

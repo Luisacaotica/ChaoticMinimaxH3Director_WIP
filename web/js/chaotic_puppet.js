@@ -12,9 +12,10 @@
  *   - scale      multiplier on the fitted size (1.0 = fits the stage)
  *   - rotation   degrees (JS preview negates it to match PIL's direction)
  *   - opacity    0..1, the visual reference strength
- *   - keys       [{t, x, y, scale, rotation, opacity}] — layer is visible only
- *                inside [first.t, last.t] and interpolates linearly; a layer
- *                without keys is static and always visible
+ *   - keys       [{t, ease, x, y, scale, rotation, opacity}] — layer is visible
+ *                only inside [first.t, last.t]. `ease` (linear|in|out|inout|hold)
+ *                shapes the outgoing motion toward the next key (hold = step).
+ *                A layer without keys is static and always visible.
  *   - layers[0]  is the TOP layer (Photoshop style)
  */
 const { app } = window.comfyAPI.app;
@@ -67,6 +68,8 @@ const CSS = `
 .pup-audio{display:flex;flex-direction:column;gap:5px}
 .pup-wave{background:#101214;border:1px solid #1c1c1c;border-radius:5px;display:block;width:100%;cursor:pointer;flex:none}
 .pup-statusline{font-size:10px;color:#9a9a9a;min-height:14px}
+.pup-keystrip-legend{font-size:9px;color:#777;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:2px 2px;line-height:1.4}
+.pup-ease-swatch{display:inline-block;width:8px;height:8px;border-radius:50%;margin-right:3px;vertical-align:middle}
 `;
 
 if (!document.getElementById("chaotic-puppet-styles")) {
@@ -96,6 +99,18 @@ function escapeHtml(s) {
 }
 function lerp(a, b, f) { return a + (b - a) * f; }
 
+const EASE_MODES = ["linear", "in", "out", "inout", "hold"];
+const EASE_COLORS = { linear: "#3a3a3a", in: "#e07b39", out: "#3fb8c4", inout: "#9b6bff", hold: "#d84a4a" };
+/* Progress-curve for a segment whose outgoing key has the given ease (mirrors mockup.py). */
+function easeF(f, mode) {
+  if (mode === "in") return f * f;
+  if (mode === "out") return 1 - (1 - f) * (1 - f);
+  if (mode === "inout") return f * f * (3 - 2 * f);
+  if (mode === "hold") return 0;
+  return f;
+}
+function normalizeEase(e) { return EASE_MODES.indexOf(e) >= 0 ? e : "linear"; }
+
 function propsAt(layer, t) {
   const keys = (layer.keys || []).slice().sort((a, b) => a.t - b.t);
   if (keys.length === 0) {
@@ -112,12 +127,18 @@ function propsAt(layer, t) {
   const before = keys[keys.indexOf(after) - 1];
   const span = Math.max(1e-6, after.t - before.t);
   const f = (t - before.t) / span;
+  if (normalizeEase(before.ease) === "hold") {
+    /* Step: the outgoing key's pose holds until the next key's time, then jumps. */
+    const src = f >= 1 - 1e-9 ? after : before;
+    return { x: src.x, y: src.y, scale: src.scale, rotation: src.rotation, opacity: src.opacity };
+  }
+  const f2 = easeF(f, normalizeEase(before.ease));
   return {
-    x: lerp(before.x, after.x, f),
-    y: lerp(before.y, after.y, f),
-    scale: lerp(before.scale, after.scale, f),
-    rotation: lerp(before.rotation, after.rotation, f),
-    opacity: lerp(before.opacity, after.opacity, f),
+    x: lerp(before.x, after.x, f2),
+    y: lerp(before.y, after.y, f2),
+    scale: lerp(before.scale, after.scale, f2),
+    rotation: lerp(before.rotation, after.rotation, f2),
+    opacity: lerp(before.opacity, after.opacity, f2),
   };
 }
 
@@ -229,6 +250,7 @@ class ChaoticPuppetEditor {
       keys: Array.isArray(l.keys)
         ? l.keys.map(k => ({
             t: Math.max(0, Number(k.t) || 0),
+            ease: normalizeEase(k.ease),
             x: Number(k.x) != null ? Number(k.x) : 0.5,
             y: Number(k.y) != null ? Number(k.y) : 0.5,
             scale: Math.max(0.01, Number(k.scale) || 1),
@@ -250,7 +272,7 @@ class ChaoticPuppetEditor {
         id: l.id, type: l.type, name: l.name, file: l.file, fit: l.fit,
         x: l.x, y: l.y, scale: l.scale, rotation: l.rotation, opacity: l.opacity,
         text: l.text, color: l.color, font_size: l.font_size, trim_start: l.trim_start,
-        keys: l.keys.map(k => ({ t: k.t, x: k.x, y: k.y, scale: k.scale, rotation: k.rotation, opacity: k.opacity })),
+        keys: l.keys.map(k => ({ t: k.t, ease: normalizeEase(k.ease), x: k.x, y: k.y, scale: k.scale, rotation: k.rotation, opacity: k.opacity })),
       })),
       audio: this.state.audio,
     }, null, 1);
@@ -435,6 +457,12 @@ class ChaoticPuppetEditor {
     this.keyCanvas.className = "pup-keystrip";
     this.keyCtx = this.keyCanvas.getContext("2d");
     this.wrapper.appendChild(this.keyCanvas);
+    const keyLegend = document.createElement("div");
+    keyLegend.className = "pup-keystrip-legend";
+    keyLegend.innerHTML = EASE_MODES.map(m =>
+      `<span><span class="pup-ease-swatch" style="background:${EASE_COLORS[m]}"></span>${m}</span>`
+    ).join("") + `<span style="margin-left:auto">ease of each key's outgoing segment — select a key to change it</span>`;
+    this.wrapper.appendChild(keyLegend);
 
     /* layers panel */
     this.layersPanel = document.createElement("div");
@@ -738,16 +766,41 @@ class ChaoticPuppetEditor {
       ctx.fillText(t.toFixed(0) + "s", x + 2, h - 8);
       ctx.fillStyle = "#555";
     }
-    /* key markers (selected layer prominent) */
+    /* eased segment curves for the selected layer (the actual interpolation) */
     const sel = this.selectedId ? this.layerById(this.selectedId) : null;
+    const selKeys = sel && sel.keys ? sel.keys.slice().sort((a, b) => a.t - b.t) : [];
+    if (selKeys.length > 1) {
+      ctx.lineWidth = 1;
+      for (let i = 0; i < selKeys.length - 1; i++) {
+        const a = selKeys[i], b = selKeys[i + 1];
+        const span = Math.max(1e-6, b.t - a.t);
+        ctx.strokeStyle = "rgba(155,107,255,.75)";
+        ctx.beginPath();
+        for (let s = 0; s <= 16; s++) {
+          const f = s / 16;
+          const f2 = easeF(f, normalizeEase(a.ease));
+          const x = ((a.t + f * span) / dur) * w;
+          const y = h / 2 - (f2 - 0.5) * (h - 12);
+          if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+        }
+        ctx.stroke();
+      }
+    }
+    /* key markers (fill = outgoing ease, ring = selected layer) */
     this.state.layers.forEach(layer => {
       const isSel = sel && sel.id === layer.id;
       (layer.keys || []).forEach(k => {
         const x = (k.t / dur) * w;
-        ctx.fillStyle = isSel ? "#4aa47f" : "#3a3a3a";
+        ctx.fillStyle = EASE_COLORS[normalizeEase(k.ease)] || EASE_COLORS.linear;
         ctx.beginPath();
-        ctx.arc(x, h / 2, isSel ? 4 : 3, 0, Math.PI * 2);
+        ctx.arc(x, h / 2, 3, 0, Math.PI * 2);
         ctx.fill();
+        if (isSel) {
+          ctx.strokeStyle = "#4aa47f";
+          ctx.beginPath();
+          ctx.arc(x, h / 2, 4.5, 0, Math.PI * 2);
+          ctx.stroke();
+        }
       });
     });
     if (sel && sel.keys && sel.keys.length) {
@@ -811,7 +864,7 @@ class ChaoticPuppetEditor {
     const existing = this.keyAtPlayhead(layer);
     if (existing) return existing;
     const cur = propsAt(layer, this.playhead) || { x: layer.x, y: layer.y, scale: layer.scale, rotation: layer.rotation, opacity: layer.opacity };
-    const key = { t: Math.round(this.playhead * 1000) / 1000, x: cur.x, y: cur.y, scale: cur.scale, rotation: cur.rotation, opacity: cur.opacity };
+    const key = { t: Math.round(this.playhead * 1000) / 1000, ease: "linear", x: cur.x, y: cur.y, scale: cur.scale, rotation: cur.rotation, opacity: cur.opacity };
     layer.keys.push(key);
     layer.keys.sort((a, b) => a.t - b.t);
     return key;
@@ -1203,9 +1256,42 @@ class ChaoticPuppetEditor {
 
     const head = document.createElement("div");
     head.className = "pup-panel-title";
-    const keyInfo = this.keyAtPlayhead(layer) ? "key @ playhead" : "no key @ playhead";
+    const keyHere = this.keyAtPlayhead(layer);
+    const keyInfo = keyHere ? "key @ playhead" : "no key @ playhead";
     head.innerHTML = `<span>${escapeHtml(layer.type)} — ${keyInfo}</span>`;
     ins.appendChild(head);
+
+    if (keyHere) {
+      const easeRow = document.createElement("div");
+      easeRow.className = "pup-row";
+      const easeLab = document.createElement("span");
+      easeLab.className = "pup-label";
+      easeLab.style.width = "56px";
+      easeLab.textContent = "Ease";
+      const easeSel = document.createElement("select");
+      easeSel.className = "pup-input";
+      EASE_MODES.forEach(m => {
+        const o = document.createElement("option");
+        o.value = m;
+        o.textContent = m;
+        easeSel.appendChild(o);
+      });
+      easeSel.value = normalizeEase(keyHere.ease);
+      easeSel.style.color = EASE_COLORS[normalizeEase(keyHere.ease)] || "#e8e8e8";
+      easeSel.addEventListener("change", () => {
+        keyHere.ease = normalizeEase(easeSel.value);
+        this.commitChanges();  // commitChanges re-draws the strip
+        this.buildInspector();
+      });
+      const easeHint = document.createElement("span");
+      easeHint.className = "pup-label";
+      easeHint.style.color = "#666";
+      easeHint.textContent = "outgoing motion toward the next key";
+      easeRow.appendChild(easeLab);
+      easeRow.appendChild(easeSel);
+      easeRow.appendChild(easeHint);
+      ins.appendChild(easeRow);
+    }
 
     if (layer.type === "text") {
       const textRow = document.createElement("div");

@@ -130,6 +130,67 @@ def test_text_layer_renders_content():
     assert bright_frac < 0.5, f"text covers {bright_frac:.2%} of the frame"
 
 
+def test_keyframe_easing_modes():
+    base = {
+        "id": "e", "type": "image", "name": "", "file": "",
+        "fit": "contain", "x": 0.0, "y": 0.5, "scale": 1.0,
+        "rotation": 0, "opacity": 1.0, "text": "", "color": "#fff",
+        "font_size": 0.06, "trim_start": 0,
+        "keys": [
+            {"t": 0.0, "ease": "out", "x": 0.0, "y": 0.5, "scale": 1.0, "rotation": 0.0, "opacity": 1.0},
+            {"t": 2.0, "x": 1.0, "y": 0.5, "scale": 1.0, "rotation": 0.0, "opacity": 1.0},
+        ],
+    }
+    # ease-out: fast start, slow end -> x(0.75) > linear x(0.5) at the midpoint
+    assert props_at(base, 1.0)["x"] == pytest.approx(0.75)
+
+    # ease-in: slow start, fast end -> x(0.25) < linear at the midpoint
+    ease_in = dict(base, keys=[dict(base["keys"][0], ease="in"), base["keys"][1]])
+    assert props_at(ease_in, 1.0)["x"] == pytest.approx(0.25)
+
+    # inout smoothstep is symmetric: still 0.5 at the midpoint, but the curve differs
+    inout = dict(base, keys=[dict(base["keys"][0], ease="inout"), base["keys"][1]])
+    assert props_at(inout, 1.0)["x"] == pytest.approx(0.5)
+    f = 0.25 / 2.0  # linear progress over the 2 s segment
+    f2 = f * f * (3 - 2 * f)  # smoothstep
+    assert props_at(inout, 0.25)["x"] == pytest.approx(f2)
+
+    # missing ease defaults to linear
+    lin = dict(base, keys=[dict(base["keys"][0], ease="linear"), base["keys"][1]])
+    assert props_at(lin, 1.0)["x"] == pytest.approx(0.5)
+
+    # hold: the pose stays at key A for the whole segment, then jumps at key B
+    hold = dict(base, keys=[
+        {"t": 0.0, "ease": "hold", "x": 0.2, "y": 0.5, "scale": 1.0, "rotation": 0.0, "opacity": 1.0},
+        {"t": 2.0, "x": 0.9, "y": 0.5, "scale": 1.0, "rotation": 0.0, "opacity": 1.0},
+    ])
+    assert props_at(hold, 0.5)["x"] == pytest.approx(0.2)
+    assert props_at(hold, 1.5)["x"] == pytest.approx(0.2)
+    assert props_at(hold, 2.0)["x"] == pytest.approx(0.9)
+
+
+def test_parse_scene_validates_key_ease():
+    scene = {
+        "version": 1, "aspect": "16:9",
+        "bg": {"type": "color", "color": [0, 0, 0]},
+        "layers": [{
+            "id": "l", "type": "image", "name": "", "file": "", "fit": "contain",
+            "x": 0.5, "y": 0.5, "scale": 1, "rotation": 0, "opacity": 1,
+            "text": "", "color": "#fff", "font_size": 0.06, "trim_start": 0,
+            "keys": [
+                {"t": 0.0, "ease": "inout", "x": 0.1, "y": 0.5, "scale": 1, "rotation": 0, "opacity": 1},
+                {"t": 1.0, "ease": "bogus", "x": 0.9, "y": 0.5, "scale": 1, "rotation": 0, "opacity": 1},
+                {"t": 2.0, "x": 0.5, "y": 0.5, "scale": 1, "rotation": 0, "opacity": 1},
+            ],
+        }],
+        "audio": {"file": "", "trim_start": 0, "trim_end": None},
+    }
+    keys = parse_scene(json.dumps(scene))["layers"][0]["keys"]
+    assert keys[0]["ease"] == "inout"   # valid mode kept
+    assert keys[1]["ease"] == "linear"  # unknown mode -> linear
+    assert keys[2]["ease"] == "linear"  # missing -> linear
+
+
 def test_aspect_round_trips_through_parse_and_default():
     default = default_scene_dict()
     assert default["aspect"] == "16:9"

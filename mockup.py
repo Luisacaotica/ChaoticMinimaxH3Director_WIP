@@ -19,10 +19,12 @@ Coordinate model (mirrored exactly by web/js/chaotic_puppet.js):
   * opacity     — 0..1; also the *visual* reference strength (a 40% character
                   literally shows the background through it, exactly like a
                   weak reference).
-  * keyframes   — snapshots of {t, x, y, scale, rotation, opacity}; the layer
-                  is visible only inside [first.t, last.t] and interpolates
-                  linearly between keys.  A layer with no keyframes is static
-                  and visible for the whole scene.
+  * keyframes   — snapshots of {t, ease, x, y, scale, rotation, opacity}; the
+                  layer is visible only inside [first.t, last.t].  `ease`
+                  (linear | in | out | inout | hold) shapes the outgoing motion
+                  toward the next key; hold steps (the pose holds until the
+                  next key's time, then jumps).  A layer with no keyframes is
+                  static and visible for the whole scene.
 
 The renderer is deliberately free of ComfyUI imports (torch only, for the
 output tensor) so the whole pipeline is unit-testable in a plain interpreter.
@@ -38,6 +40,12 @@ SCENE_VERSION = 1
 
 LAYER_TYPES = ("image", "video", "text")
 FITS = ("contain",)
+
+# Keyframe easing modes.  `ease` on a key shapes the OUTGOING motion toward the
+# next key: linear | in (ease-in) | out (ease-out) | inout (smoothstep) | hold
+# (step — the key's pose holds until the next key's time, then jumps).
+EASE_MODES = ("linear", "in", "out", "inout", "hold")
+_TRANSFORM_PROPS = ("x", "y", "scale", "rotation", "opacity")
 
 
 # --------------------------------------------------------------------------- #
@@ -116,8 +124,10 @@ def parse_scene(json_text: str) -> Dict[str, Any]:
                 for raw_key in raw_keys:
                     if not isinstance(raw_key, dict):
                         continue
+                    ease = raw_key.get("ease")
                     layer["keys"].append({
                         "t": max(0.0, _as_float(raw_key.get("t"))),
+                        "ease": ease if ease in EASE_MODES else "linear",
                         "x": _as_float(raw_key.get("x"), layer["x"]),
                         "y": _as_float(raw_key.get("y"), layer["y"]),
                         "scale": max(0.01, _as_float(raw_key.get("scale"), layer["scale"])),
@@ -153,6 +163,19 @@ def _lerp(a: float, b: float, f: float) -> float:
     return a + (b - a) * f
 
 
+def _ease_progress(f: float, mode: str) -> float:
+    """Map linear progress f (0..1) through the easing curve (mirrors easeF in JS)."""
+    if mode == "in":
+        return f * f
+    if mode == "out":
+        return 1 - (1 - f) * (1 - f)
+    if mode == "inout":
+        return f * f * (3 - 2 * f)
+    if mode == "hold":
+        return 0.0
+    return f
+
+
 def props_at(layer: Dict[str, Any], t: float) -> Optional[Dict[str, float]]:
     """Interpolated transform at scene time t, or None when the layer is hidden.
 
@@ -176,12 +199,20 @@ def props_at(layer: Dict[str, Any], t: float) -> Optional[Dict[str, float]]:
     before = keys[keys.index(after) - 1]
     span = max(1e-6, after["t"] - before["t"])
     f = (t - before["t"]) / span
+    mode = before.get("ease", "linear")
+    if mode not in EASE_MODES:
+        mode = "linear"
+    if mode == "hold":
+        # Step: the outgoing key's pose holds until the next key's time, then jumps.
+        src = after if f >= 1 - 1e-9 else before
+        return {p: src[p] for p in _TRANSFORM_PROPS}
+    f2 = _ease_progress(f, mode)
     return {
-        "x": _lerp(before["x"], after["x"], f),
-        "y": _lerp(before["y"], after["y"], f),
-        "scale": _lerp(before["scale"], after["scale"], f),
-        "rotation": _lerp(before["rotation"], after["rotation"], f),
-        "opacity": _lerp(before["opacity"], after["opacity"], f),
+        "x": _lerp(before["x"], after["x"], f2),
+        "y": _lerp(before["y"], after["y"], f2),
+        "scale": _lerp(before["scale"], after["scale"], f2),
+        "rotation": _lerp(before["rotation"], after["rotation"], f2),
+        "opacity": _lerp(before["opacity"], after["opacity"], f2),
     }
 
 
