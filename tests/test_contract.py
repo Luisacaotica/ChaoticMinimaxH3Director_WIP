@@ -86,6 +86,7 @@ def js_serialized_timeline():
                 "annotation": "Gravel voice, smug smirk.",
                 "tag_type": "subject",
                 "use_soundtrack": False,
+                "timed": True,
             },
             {
                 "id": "ref_2",
@@ -101,9 +102,12 @@ def js_serialized_timeline():
                 "annotation": "",
                 "tag_type": "picture",
                 "use_soundtrack": True,
+                "timed": True,
             },
         ],
         "boundaries": [],
+        "render_in": None,
+        "render_out": None,
     }
 
 
@@ -115,6 +119,8 @@ def test_js_serialized_timeline_round_trips_through_assembly():
     assert [s.id for s in timeline.shots] == ["shot_1", "shot_2"]
     assert len(timeline.refs) == 2
     assert timeline.project.format == "official"
+    assert timeline.render_in is None
+    assert timeline.render_out is None
 
     # Tag assignment mirrors the JS widget's assignGlobalTags.
     tags = assign_global_tags(timeline)

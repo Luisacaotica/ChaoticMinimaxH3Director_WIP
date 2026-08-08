@@ -27,6 +27,7 @@ from .timeline import (
     assign_global_tags,
     default_timeline_json,
     parse_timeline,
+    slice_timeline,
     timeline_issues,
 )
 from . import vrma
@@ -42,7 +43,7 @@ def _sub_timeline_from(timeline, start_sec: float):
     sub.shots = [shot for shot in sub.shots if shot.end > start_sec + 1e-6]
     for shot in sub.shots:
         shot.start = max(0.0, shot.start - start_sec)
-    sub.refs = [ref for ref in sub.refs if ref.end > start_sec + 1e-6]
+    sub.refs = [ref for ref in sub.refs if (not ref.timed) or ref.end > start_sec + 1e-6]
     for ref in sub.refs:
         ref.start = max(0.0, ref.start - start_sec)
     sub.pinned_boundaries = [b - start_sec for b in sub.pinned_boundaries if b > start_sec + 1e-6]
@@ -117,6 +118,13 @@ class ChaoticDirector:
     ):
         fps = max(1, min(120, int(fps)))
         timeline = parse_timeline(timeline_data)
+        if timeline.render_in is not None or timeline.render_out is not None:
+            _log(
+                f"render window set: {timeline.render_in or 0.0:.2f}s → "
+                f"{timeline.render_out if timeline.render_out is not None else 'end'}"
+                "s — slicing the timeline for this render"
+            )
+            timeline = slice_timeline(timeline, timeline.render_in, timeline.render_out)
         for issue in timeline_issues(timeline):
             _log(f"WARNING: {issue}")
 
@@ -271,6 +279,8 @@ class ChaoticPromptAssembler:
     def assemble(self, timeline_data, fps, chunk_seconds, continuity, video_context, format_override):
         fps = max(1, min(120, int(fps)))
         timeline = parse_timeline(timeline_data)
+        if timeline.render_in is not None or timeline.render_out is not None:
+            timeline = slice_timeline(timeline, timeline.render_in, timeline.render_out)
         target_frames = align_frame_count(max(5, int(round(float(chunk_seconds) * fps))))
         plans = plan_chunks(timeline, target_frames, fps, continuity, video_context)
         global_tags = assign_global_tags(timeline)

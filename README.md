@@ -42,6 +42,10 @@ It is a **conductor, not an engine**: every model patch in your graph — turbo 
 | 🧱 **VRAM-safe chunking** | Fixed or **auto** chunk duration. Auto mode probes free VRAM, learns from this session's successful renders (records peak allocation per chunk), and shrinks + retries if a chunk OOMs. |
 | 🔗 **Frame-accurate seams** | `keyframe+picture` (default): previous chunk's last frame is both a geometric I2VA keyframe re-injected at frame 0 *during* sampling, and a `<Picture N>` reference. The "last-frame glitch" class of bug is avoided by design — keyframes are never appended to the latent tail, so no trailing guide frames need cropping. |
 | 🎞️ **Video context continuity** | Optionally feed the whole previous chunk as a `<Video N>` weak reference, so hard-cut multi-angle scenes keep motion/energy/lighting continuity across cuts. |
+| 🎥 **Scrub + preview** | Drag on the ruler to scrub: the video frame / picture under the playhead renders in a live preview strip (play the trim range, or click any ref's **Preview** button). Make precision cuts against the actual footage. |
+| 📚 **Reference library** | Drop media that is *just a reference* (look-and-feel, mood, subject sheets) into the library panel — it never appears on the timeline, but stays available to **every** shot as `<Picture N>`/`<Video N>`/`<Audio N>`. Timeline media and reference media never mix. |
+| ✂️ **Render window (IN/OUT)** | Sony-Vegas style: set IN/OUT on the ruler (or at the playhead) and render **only that range** — iterate a single scene without re-rendering the whole project. The window is drawn, shaded and saved with the project. |
+| 💾 **Project save / load** | Export the whole timeline (shots, refs, strengths, boundaries, render window) to a `.json` project file and load it back — or keep it in the workflow, since the editor already serializes into `timeline_data`. |
 | 🎼 **Prompt formats** | Both verified H3 formats: the official field structure (`subject_definitions → summary → retention_analysis → detailed_description [Shot N]/MM:SS.sss → overall_soundscape → non_diegetic_music`) and the looser narrative scene-block format — switchable per project **and** per shot. |
 | 🎬 **Editing mode** | Character swap, restyle, motion/expression transfer, audio style transfer — import the clip being edited with a "source" role, distinct from reference/mood-donor clips. |
 | 📝 **Reference annotations** | Free-text notes per reference that flow into `subject_definitions:` (personality, voice, attributes the image doesn't show). |
@@ -114,8 +118,12 @@ The Director node embeds a full DOM timeline widget (a custom ComfyUI widget —
 - **Strength sliders** per reference map onto H3's `retention_analysis` bands — the label shown is what the Director will actually emit.
 - **Subject shortcuts** — type `S1`/`S2` (or `@name`) in a shot's text; it is live-validated against the references active at that timeline position.
 - **Chunk boundaries** are drawn on the timeline so you see exactly where an automatic cut will fall — drag a boundary to pin it, or snap it to a shot break.
-- **Project scaffolding** panel: format toggle (official / narrative), LoRA trigger token, style clarification line, and the full field set for the chosen format.
-- **Per-shot format override** — strict shot/timestamp control on action sequences, looser narrative phrasing on dialogue, in the same timeline.
+- **Project scaffolding** panel: format toggle (official / narrative), LoRA trigger token, style clarification line, and the full field set for the chosen format. Switching format updates the field set *instantly* — no re-click needed.
+- **Per-shot format override** — strict shot/timestamp control on action sequences, looser narrative phrasing on dialogue, in the same timeline (the format is shown as a badge right on the shot block).
+- **Scrub preview** — drag on the ruler to move the playhead; the video or picture under it appears in the preview strip, with its own play/seek controls locked to the reference's trim range.
+- **Reference library** — drop files into the library panel (or flip any ref to **Library** placement) to keep them out of the timeline but available to every shot.
+- **Render window** — set **IN/OUT** markers on the ruler (or at the playhead via the toolbar buttons); everything outside the window is shaded, and only that range renders.
+- **Save / Load** — export/import the full project as a `.json` file (the reference LTX-style workflow: works standalone, survives even if the workflow JSON is lost).
 - **Annotations** on any reference flow into `subject_definitions:`.
 
 Widget edits serialize straight back into the node's `timeline_data` string, so timelines survive save/load/reload like any widget.

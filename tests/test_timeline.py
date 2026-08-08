@@ -4,10 +4,12 @@ import json
 
 import pytest
 
+from ChaoticMinimaxH3Director.chunking import plan_chunks
 from ChaoticMinimaxH3Director.timeline import (
     assign_global_tags,
     default_timeline_dict,
     parse_timeline,
+    slice_timeline,
     subject_shorthands,
     timeline_issues,
 )
@@ -99,3 +101,94 @@ def test_strength_clamped():
     refs = [{"id": "r", "kind": "audio", "file": "a.wav", "start": 0.0, "duration": 1.0, "strength": 5.0}]
     timeline = parse_timeline(make_timeline_json(refs=refs))
     assert timeline.refs[0].strength == 1.0
+
+
+def _timeline_with_library_ref():
+    """A 10s timeline whose single shot spans 0..10, with one library (untimed)
+    picture ref and one timed video ref."""
+    shots = [{"id": "s1", "start": 0.0, "duration": 10.0, "text": "[Shot 1] A calm establishing shot."}]
+    refs = [
+        {
+            "id": "lib_pic", "kind": "picture", "file": "look.png", "name": "Look",
+            "start": 999.0, "duration": 2.0, "strength": 0.8, "timed": False,
+        },
+        {
+            "id": "clip", "kind": "video", "file": "clip.mp4", "name": "Clip",
+            "start": 2.0, "duration": 4.0, "strength": 1.0, "timed": True,
+        },
+    ]
+    return make_timeline_json(shots=shots, refs=refs)
+
+
+def test_library_ref_is_always_in_scope_and_never_flagged():
+    timeline = parse_timeline(_timeline_with_library_ref())
+    lib = timeline.refs[0]
+    assert lib.timed is False
+
+    # Library refs never extend the authored duration and are not flagged as orphaned.
+    assert timeline.duration_sec == 10.0
+    issues = timeline_issues(timeline)
+    assert all("no shot covers" not in issue for issue in issues)
+
+    # A library ref must appear in EVERY chunk, no matter the window.
+    plans = plan_chunks(timeline, 124, 24, "keyframe+picture", False)
+    assert len(plans) >= 1
+    for plan in plans:
+        ids = [e.ref.id for e in plan.ref_entries if e.ref is not None]
+        assert "lib_pic" in ids, f"library ref missing from chunk {plan.index}"
+
+
+def test_library_refs_tagged_after_timeline_refs():
+    """Timed refs keep their numbering; library refs follow — adding a library
+    ref never renumbers existing timeline tags."""
+    refs = [
+        {"id": "lib_a", "kind": "picture", "file": "a.png", "start": 0.0, "duration": 1.0, "timed": False},
+        {"id": "t_b", "kind": "picture", "file": "b.png", "start": 5.0, "duration": 1.0, "timed": True},
+        {"id": "lib_c", "kind": "subject", "file": "c.png", "start": 0.0, "duration": 1.0, "timed": False},
+    ]
+    timeline = parse_timeline(make_timeline_json(refs=refs))
+    tags = assign_global_tags(timeline)
+    assert tags["t_b"] == "<Picture 1>"   # timed first, even though lib_a comes earlier in the array
+    assert tags["lib_a"] == "<Picture 2>"
+    assert tags["lib_c"] == "<Picture 3>"
+    sh = subject_shorthands(timeline)
+    assert sh["lib_c"] == "S1"
+
+
+def test_render_window_slices_and_rebases():
+    timeline = parse_timeline(_timeline_with_library_ref())
+    sliced = slice_timeline(timeline, 3.0, 9.0)
+
+    assert sliced.render_in is None and sliced.render_out is None  # already applied
+    assert len(sliced.shots) == 1
+    assert sliced.shots[0].start == 0.0
+    assert sliced.shots[0].duration == 6.0  # 3.0 -> 9.0 window
+
+    # The timed video ref (2.0..6.0) partially overlaps the window: clipped + re-based.
+    clip = next(r for r in sliced.refs if r.id == "clip")
+    assert clip.start == 0.0
+    assert clip.duration == 3.0             # 6.0 - 3.0
+    assert clip.trim_start == 1.0           # media advanced by (3.0 - 2.0)
+    # The library ref passes through untouched.
+    lib = next(r for r in sliced.refs if r.id == "lib_pic")
+    assert lib.timed is False
+    assert lib.start == 999.0
+
+
+def test_render_window_slices_with_boundaries():
+    timeline = parse_timeline(make_timeline_json(boundaries=[2.0, 5.0, 12.0]))
+    sliced = slice_timeline(timeline, 3.0, 10.0)
+    assert sliced.pinned_boundaries == [2.0]  # 5.0-3.0=2.0 kept; others out of window
+
+
+def test_render_range_parsed_from_serialized_widget():
+    data = default_timeline_dict()
+    data["render_in"] = 2.5
+    data["render_out"] = 8.0
+    timeline = parse_timeline(json.dumps(data))
+    assert timeline.render_in == 2.5
+    assert timeline.render_out == 8.0
+
+    # The default 0..5s shot is clipped to the 2.5..8.0 window.
+    sliced = slice_timeline(timeline, timeline.render_in, timeline.render_out)
+    assert sliced.shots and sliced.shots[0].duration == pytest.approx(2.5, abs=1e-3)

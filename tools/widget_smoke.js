@@ -79,6 +79,10 @@ function makeElement(tag) {
     getContext() { return makeCtx2d(); },
     click() {},
     focus() {},
+    load() {},
+    pause() {},
+    play() { return Promise.resolve(); },
+    replaceWith() {},
     getBoundingClientRect() { return { left: 0, top: 0, width: 800, height: 300 }; },
   };
   return el;
@@ -153,9 +157,14 @@ const savedTimeline = {
   refs: [
     { id: "ref_pic", kind: "picture", file: "input/luisa_sheet.png", name: "Luisa sheet",
       start: 0, duration: 3, trim_start: 0, trim_end: null, strength: 0.9, role: "reference",
-      annotation: "", tag_type: "picture", use_soundtrack: false },
+      annotation: "", tag_type: "picture", use_soundtrack: false, timed: true },
+    { id: "ref_lib", kind: "picture", file: "input/mood.png", name: "Mood board",
+      start: 0, duration: 3, trim_start: 0, trim_end: null, strength: 0.7, role: "reference",
+      annotation: "", tag_type: "picture", use_soundtrack: false, timed: false },
   ],
   boundaries: [7.0],
+  render_in: 2.0,
+  render_out: 9.0,
 };
 
 let failures = 0;
@@ -205,16 +214,37 @@ function check(name, cond, extra) {
   check("editor was constructed", !!ed);
   if (!ed) { console.error("FAIL: widget editor missing — widget is blank. " + (threw ? threw.stack : "")); process.exit(1); }
   check("editor loaded 3 saved shots", ed.state.shots.length === 3, "shots=" + ed.state.shots.length);
-  check("editor loaded 1 saved ref", ed.state.refs.length === 1, "refs=" + ed.state.refs.length);
+  check("editor loaded 2 saved refs", ed.state.refs.length === 2, "refs=" + ed.state.refs.length);
   check("editor kept pinned boundary 7.0", ed.state.boundaries.length === 1 && Math.abs(ed.state.boundaries[0] - 7.0) < 1e-6);
+  check("editor loaded render window 2.0 -> 9.0", ed.renderIn === 2.0 && ed.renderOut === 9.0,
+        "in=" + ed.renderIn + " out=" + ed.renderOut);
+  check("library ref parsed as untimed", ed.state.refs.some(r => r.id === "ref_lib" && r.timed === false));
   check("loadShotThumbs is a function", typeof ed.loadShotThumbs === "function");
   check("loadRefThumb is a function", typeof ed.loadRefThumb === "function");
   check("editor built the wrapper DOM", !!(ed.wrapper && ed.wrapper.children.length > 0));
+  check("editor built preview strip", !!(ed.previewPanel && ed.previewVideo));
+  check("editor built library panel", !!(ed.libraryPanel && ed.libraryGrid));
   check("canvas exists with 2d ctx", !!ed.ctx);
   const serialized = JSON.parse(ed.serialize());
   check("reserialize round-trips shots", serialized.shots.length === 3);
-  check("reserialize round-trips refs", serialized.refs.length === 1);
+  check("reserialize round-trips refs", serialized.refs.length === 2);
   check("reserialize keeps boundary", serialized.boundaries.length === 1);
+  check("reserialize keeps render window", serialized.render_in === 2.0 && serialized.render_out === 9.0);
+  check("reserialize keeps timed flags", serialized.refs.find(r => r.id === "ref_lib").timed === false);
+
+  /* new interactions: playhead scrub + library placement toggle */
+  let scrubbed = null;
+  try { ed.setPlayhead(3.5); scrubbed = ed.playhead; } catch (e) { scrubbed = "THREW: " + e.message; }
+  check("setPlayhead works", scrubbed === 3.5, "playhead=" + scrubbed);
+  let moved = null;
+  try { ed.moveRefToLibrary("ref_pic"); moved = ed.refById("ref_pic").timed; } catch (e) { moved = "THREW: " + e.message; }
+  check("moveRefToLibrary flips timed", moved === false, "timed=" + moved);
+  let placed = null;
+  try { ed.placeRefOnTimeline("ref_pic"); placed = ed.refById("ref_pic").timed; } catch (e) { placed = "THREW: " + e.message; }
+  check("placeRefOnTimeline flips timed", placed === true, "timed=" + placed);
+  try { ed.clearRenderRange(); } catch (e) { check("clearRenderRange did not throw", false, e.message); }
+  check("clearRenderRange clears window", ed.renderIn === null && ed.renderOut === null);
+  ed.renderIn = 2.0; ed.renderOut = 9.0; // restore for later round-trip checks
 
   /* fresh-node path (empty timeline_data) must also construct */
   (async () => {

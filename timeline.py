@@ -26,9 +26,17 @@ The JSON produced by the widget:
                   "name": "...", "file": "...", "start": 0.0, "duration": 5.0,
                   "trim_start": 0.0, "trim_end": null, "strength": 0.9,
                   "role": "reference" | "source", "annotation": "",
-                  "tag_type": "picture" | "subject" } ],
-      "boundaries": [ 0.0, 5.0, 10.0 ]
+                  "tag_type": "picture" | "subject", "timed": true } ],
+      "boundaries": [ 0.0, 5.0, 10.0 ],
+      "render_in": null,   // optional Sony-Vegas style render window (seconds)
+      "render_out": null
     }
+
+    refs with `"timed": false` are LIBRARY references: they never appear on the
+    timeline, are excluded from the authored duration, and are always in scope
+    for every chunk (so any shot can tag them).  `render_in`/`render_out`, when
+    set, restrict the render to that window — the node slices and re-bases the
+    timeline via slice_timeline() before planning chunks.
 
 Tag assignment (must be mirrored exactly by the JS widget):
 
@@ -45,6 +53,7 @@ Tag assignment (must be mirrored exactly by the JS widget):
 
 from __future__ import annotations
 
+import copy
 import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -112,6 +121,8 @@ class Ref:
     annotation: str = ""
     tag_type: str = "picture"  # only meaningful for kind in ("picture", "subject")
     use_soundtrack: bool = False  # video refs: carry their audio track as <Audio j>
+    timed: bool = True  # False => library reference: never placed on the timeline,
+                        # always in scope for every chunk (used purely as a reference)
     _index: int = 0  # insertion index in the JSON array (stable tie-break)
 
     @property
@@ -130,14 +141,19 @@ class Timeline:
     shots: List[Shot] = field(default_factory=list)
     refs: List[Ref] = field(default_factory=list)
     pinned_boundaries: List[float] = field(default_factory=list)
+    # Render window (Sony-Vegas style in/out).  None = full timeline.
+    render_in: Optional[float] = None
+    render_out: Optional[float] = None
 
     @property
     def duration_sec(self) -> float:
+        """Length of the authored scene.  Untimed (library) refs never extend it."""
         end = 0.0
         for shot in self.shots:
             end = max(end, shot.end)
         for ref in self.refs:
-            end = max(end, ref.end)
+            if ref.timed:
+                end = max(end, ref.end)
         return end
 
     def shot_at(self, t: float) -> Optional[Shot]:
@@ -255,6 +271,7 @@ def parse_timeline(json_text: str) -> Timeline:
                 annotation=_as_str(entry.get("annotation")),
                 tag_type=entry.get("tag_type") if entry.get("tag_type") in ("picture", "subject") else "picture",
                 use_soundtrack=bool(entry.get("use_soundtrack", False)),
+                timed=bool(entry.get("timed", True)),
                 _index=index,
             ))
 
@@ -273,8 +290,14 @@ def parse_timeline(json_text: str) -> Timeline:
     fps = int(_as_float(data.get("fps"), 24) or 24)
     fps = max(1, min(120, fps))
 
+    render_in = data.get("render_in")
+    render_in = None if render_in is None else max(0.0, _as_float(render_in))
+    render_out = data.get("render_out")
+    render_out = None if render_out is None else _as_float(render_out)
+
     return Timeline(fps=fps, project=project, shots=shots, refs=refs,
-                    pinned_boundaries=boundaries)
+                    pinned_boundaries=boundaries,
+                    render_in=render_in, render_out=render_out)
 
 
 # --------------------------------------------------------------------------- #
@@ -282,25 +305,25 @@ def parse_timeline(json_text: str) -> Timeline:
 # --------------------------------------------------------------------------- #
 
 
+def _order_refs(refs: List[Ref]) -> List[Ref]:
+    """Timeline refs first (by start, insertion index), then library refs (by
+    insertion index) — so adding a library reference never renumbers existing
+    timeline tags."""
+    timed = sorted((r for r in refs if r.timed), key=lambda r: (r.start, r._index))
+    untimed = sorted((r for r in refs if not r.timed), key=lambda r: r._index)
+    return timed + untimed
+
+
 def _ordered_images(refs: List[Ref]) -> List[Ref]:
-    return sorted(
-        (ref for ref in refs if ref.kind in ("picture", "subject")),
-        key=lambda r: (r.start, r._index),
-    )
+    return [r for r in _order_refs(refs) if r.kind in ("picture", "subject")]
 
 
 def _ordered_videos(refs: List[Ref]) -> List[Ref]:
-    return sorted(
-        (ref for ref in refs if ref.kind == "video"),
-        key=lambda r: (r.start, r._index),
-    )
+    return [r for r in _order_refs(refs) if r.kind == "video"]
 
 
 def _ordered_audios(refs: List[Ref]) -> List[Ref]:
-    return sorted(
-        (ref for ref in refs if ref.kind == "audio"),
-        key=lambda r: (r.start, r._index),
-    )
+    return [r for r in _order_refs(refs) if r.kind == "audio"]
 
 
 def assign_global_tags(timeline: Timeline) -> Dict[str, str]:
@@ -322,10 +345,7 @@ def assign_global_tags(timeline: Timeline) -> Dict[str, str]:
 
 def subject_shorthands(timeline: Timeline) -> Dict[str, str]:
     """Return {ref_id: "S1"..} for subject refs (their order among subjects)."""
-    subjects = sorted(
-        (ref for ref in timeline.refs if ref.kind == "subject"),
-        key=lambda r: (r.start, r._index),
-    )
+    subjects = [r for r in _order_refs(timeline.refs) if r.kind == "subject"]
     return {ref.id: f"S{index}" for index, ref in enumerate(subjects, start=1)}
 
 
@@ -401,6 +421,8 @@ def timeline_issues(timeline: Timeline) -> List[str]:
             )
 
     for ref in timeline.refs:
+        if not ref.timed:
+            continue  # library refs are always in scope by design
         if not any(shot.overlaps(ref.start, ref.end) for shot in timeline.shots):
             issues.append(
                 f"Reference {ref.name or ref.file} is active but no shot covers its range — "
@@ -409,9 +431,76 @@ def timeline_issues(timeline: Timeline) -> List[str]:
 
     tags = assign_global_tags(timeline)
     for ref in timeline.refs:
+        if not ref.timed:
+            continue
         if ref.kind == "video" and ref.role == "source" and ref.strength < 1.0:
             issues.append(
                 f"Source clip {ref.name or ref.file} has strength {ref.strength:.2f} — "
                 "editing a clip below full preservation may drift from the original."
             )
     return issues
+
+
+# --------------------------------------------------------------------------- #
+# Render window slicing (Sony-Vegas style in/out)
+# --------------------------------------------------------------------------- #
+
+
+def slice_timeline(timeline: Timeline, in_sec: float, out_sec: Optional[float]) -> Timeline:
+    """Return a re-based copy covering only [in_sec, out_sec).
+
+    Used by the node when a render IN/OUT window is set: shots and timed refs
+    are clipped to the window and re-based to 0, pinned boundaries are moved
+    into the window, and untimed (library) refs pass through untouched so they
+    stay available to every chunk of the window.  The returned timeline has its
+    own render window cleared (it has already been applied).
+    """
+    in_sec = max(0.0, _as_float(in_sec))
+    out_sec = None if out_sec is None else _as_float(out_sec)
+    if out_sec is not None and out_sec <= in_sec:
+        out_sec = None
+
+    shots: List[Shot] = []
+    for shot in timeline.shots:
+        s = max(shot.start, in_sec)
+        e = shot.end if out_sec is None else min(shot.end, out_sec)
+        if e <= s + 1e-6:
+            continue
+        shots.append(Shot(
+            id=shot.id,
+            start=round(s - in_sec, 6),
+            duration=round(e - s, 6),
+            text=shot.text,
+            format=shot.format,
+        ))
+
+    refs: List[Ref] = []
+    for ref in timeline.refs:
+        if not ref.timed:
+            refs.append(copy.copy(ref))  # library ref: always in scope, never clipped
+            continue
+        s = max(ref.start, in_sec)
+        e = ref.end if out_sec is None else min(ref.end, out_sec)
+        if e <= s + 1e-6:
+            continue
+        new_ref = copy.copy(ref)
+        new_ref.start = round(s - in_sec, 6)
+        new_ref.duration = round(e - s, 6)
+        # Media alignment: if the ref starts before the window, advance the media
+        # trim so the visible media window stays locked to the timeline.
+        new_ref.trim_start = ref.trim_start + (s - ref.start)
+        refs.append(new_ref)
+
+    boundaries = [
+        round(b - in_sec, 6)
+        for b in timeline.pinned_boundaries
+        if b > in_sec + 1e-6 and (out_sec is None or b < out_sec)
+    ]
+
+    return Timeline(
+        fps=timeline.fps,
+        project=timeline.project,
+        shots=shots,
+        refs=refs,
+        pinned_boundaries=boundaries,
+    )

@@ -222,10 +222,18 @@ def _split_beats_at_pins(beats: List[_Beat], pins: List[float]) -> List[_Beat]:
 
 
 def _in_scope_refs(timeline: Timeline, start: float, end: float) -> List[Ref]:
-    return sorted(
-        (ref for ref in timeline.refs if ref.overlaps(start, end)),
+    """Refs active in [start, end): timed refs overlapping the window, PLUS every
+    untimed (library) ref — library references are always in scope so they can
+    be tagged from any shot, without ever appearing on the timeline."""
+    timed = sorted(
+        (ref for ref in timeline.refs if ref.timed and ref.overlaps(start, end)),
         key=lambda r: (r.start, r._index),
     )
+    untimed = sorted(
+        (ref for ref in timeline.refs if not ref.timed),
+        key=lambda r: r._index,
+    )
+    return timed + untimed
 
 
 def _chunk_ref_entries(timeline: Timeline, start: float, end: float, has_anchor: bool, video_context: bool = False) -> List[ChunkRefEntry]:

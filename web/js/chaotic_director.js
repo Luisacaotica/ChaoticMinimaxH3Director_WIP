@@ -19,6 +19,7 @@ const VIDEO_TRACK_Y = PICTURE_TRACK_Y + TRACK_H;
 const AUDIO_TRACK_Y = VIDEO_TRACK_Y + TRACK_H;
 const SHOT_TRACK_Y = AUDIO_TRACK_Y + TRACK_H;
 const TIMELINE_H = SHOT_TRACK_Y + TRACK_H;
+const PREVIEW_H = 154;
 const HANDLE_PX = 10;
 const MIN_DURATION = 0.5;
 const MAX_REF_IMAGES = 9;
@@ -78,6 +79,31 @@ const CSS = `
 .chaotic-txtback mark.tok-bad{background:rgba(220,70,70,.5)}
 .chaotic-txtarea{position:relative;background:transparent;color:#e8e8e8}
 .chaotic-statusline{font-size:10px;color:#9a9a9a;min-height:14px}
+/* scrub preview strip */
+.chaotic-preview-stage{position:relative;background:#000;border:1px solid #1c1c1c;border-radius:5px;height:88px;overflow:hidden;display:flex;align-items:center;justify-content:center;flex:none}
+.chaotic-preview-stage video{max-width:100%;max-height:100%;display:none;background:#000}
+.chaotic-preview-stage img{max-width:100%;max-height:100%;display:none;object-fit:contain;background:#000}
+.chaotic-preview-hint{color:#666;font-size:10px;text-align:center;padding:8px;line-height:1.5}
+.chaotic-preview-controls{display:flex;gap:6px;align-items:center;flex:none}
+.chaotic-preview-seek{flex:1;accent-color:#ff5a5a;height:4px}
+.chaotic-preview-time{font-family:ui-monospace,Menlo,monospace;font-size:10px;color:#c8c8c8;min-width:150px;white-space:nowrap}
+.chaotic-play-btn{background:#2a2a2a;border:1px solid #444;color:#eee;border-radius:4px;width:24px;height:22px;cursor:pointer;font-size:10px;display:flex;align-items:center;justify-content:center;flex:none}
+.chaotic-play-btn:hover{background:#3a3a3a;border-color:#666}
+.chaotic-play-btn.playing{color:#4fff8f;border-color:#4fff8f}
+/* reference library */
+.chaotic-lib-drop{border:1.5px dashed #444;border-radius:6px;padding:9px;text-align:center;color:#777;font-size:10px;cursor:pointer;transition:all .15s;flex:none}
+.chaotic-lib-drop:hover{border-color:#666;color:#aaa}
+.chaotic-lib-drop.drag-over{border-color:#4aa47f;background:rgba(74,164,127,.08);color:#7ee2a8}
+.chaotic-lib-grid{display:flex;flex-direction:column;gap:5px}
+.chaotic-lib-card{display:flex;gap:8px;align-items:center;background:#141414;border:1px solid #2a2a2a;border-radius:6px;padding:5px 7px}
+.chaotic-lib-thumb{width:52px;height:34px;object-fit:cover;border-radius:3px;background:#000;flex:none}
+.chaotic-lib-meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
+.chaotic-lib-name{font-size:10.5px;color:#e8e8e8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.chaotic-lib-tag{font-size:9.5px;color:#7ee2a8;font-family:ui-monospace,Menlo,monospace}
+.chaotic-lib-strength{width:64px;accent-color:#4aa47f;height:4px}
+.chaotic-lib-empty{font-size:10px;color:#666;padding:4px 2px}
+.chaotic-lib-hint{font-size:10px;color:#8a8a8a;line-height:1.5;padding:2px 0}
+.chaotic-range-flag{position:absolute;top:0;font-size:8px;font-weight:700;font-family:ui-monospace,Menlo,monospace;padding:0 2px;pointer-events:none}
 `;
 
 if (!document.getElementById("chaotic-director-styles")) {
@@ -158,6 +184,11 @@ class ChaoticDirectorEditor {
     this._hoverChip = null;
     this._lastWidth = 0;
     this._lastScale = 0;
+    this.playhead = null;      // seconds; null = no scrub playhead
+    this.renderIn = null;      // render window IN (seconds), null = start
+    this.renderOut = null;     // render window OUT (seconds), null = end
+    this._previewRefId = null; // ref currently loaded into the preview video
+    this._librarySig = null;   // cache key for the library grid
 
     this.timelineDataWidget = node.widgets.find(w => w.name === "timeline_data");
     this.chunkModeWidget = node.widgets.find(w => w.name === "chunk_mode");
@@ -187,18 +218,28 @@ class ChaoticDirectorEditor {
     let raw = this.timelineDataWidget ? this.timelineDataWidget.value : "";
     let data = {};
     try { if (raw) data = JSON.parse(raw); } catch (e) { /* keep defaults */ }
-    this.fps = parseInt((data.fps || this.fpsWidgetValue() || 24), 10) || 24;
+    this._applyState(data);
+  }
+
+  _applyState(raw) {
+    this.fps = parseInt((raw.fps || this.fpsWidgetValue() || 24), 10) || 24;
     this.state = {
-      project: Object.assign(this.defaultProject(), data.project || {}),
-      shots: Array.isArray(data.shots) ? data.shots.map((s, i) => this.normalizeShot(s, i)) : [],
-      refs: Array.isArray(data.refs) ? data.refs.map((r, i) => this.normalizeRef(r, i)) : [],
-      boundaries: Array.isArray(data.boundaries) ? data.boundaries.map(Number).filter(b => b > 0) : [],
+      project: Object.assign(this.defaultProject(), raw.project || {}),
+      shots: Array.isArray(raw.shots) ? raw.shots.map((s, i) => this.normalizeShot(s, i)) : [],
+      refs: Array.isArray(raw.refs) ? raw.refs.map((r, i) => this.normalizeRef(r, i)) : [],
+      boundaries: Array.isArray(raw.boundaries) ? raw.boundaries.map(Number).filter(b => b > 0) : [],
     };
-    this.state.shots.forEach(s => this.loadShotThumbs(s));
-    this.state.refs.forEach(r => this.loadRefThumb(r));
+    this.renderIn = raw.render_in == null ? null : Number(raw.render_in);
+    this.renderOut = raw.render_out == null ? null : Number(raw.render_out);
+    if (this.renderIn != null && this.renderOut != null && this.renderOut <= this.renderIn) {
+      this.renderIn = null;
+      this.renderOut = null;
+    }
     if (this.state.shots.length === 0) {
       this.state.shots = [this.normalizeShot({ id: uid("shot"), start: 0, duration: 5, text: "[Shot 1] Live-action, cinematic. The camera slowly pushes in." }, 0)];
     }
+    this.state.shots.forEach(s => this.loadShotThumbs(s));
+    this.state.refs.forEach(r => this.loadRefThumb(r));
   }
 
   fpsWidgetValue() {
@@ -233,6 +274,7 @@ class ChaoticDirectorEditor {
       annotation: r.annotation || "",
       tag_type: r.tag_type === "subject" ? "subject" : "picture",
       use_soundtrack: !!r.use_soundtrack,
+      timed: r.timed !== false,
       _index: i,
       thumb: r.thumb || null,
       peaks: r.peaks || null,
@@ -242,7 +284,7 @@ class ChaoticDirectorEditor {
   get duration() {
     let end = 0;
     this.state.shots.forEach(s => { end = Math.max(end, s.start + s.duration); });
-    this.state.refs.forEach(r => { end = Math.max(end, r.start + r.duration); });
+    this.state.refs.forEach(r => { if (r.timed) end = Math.max(end, r.start + r.duration); });
     return Math.max(5, Math.ceil(end));
   }
 
@@ -253,12 +295,8 @@ class ChaoticDirectorEditor {
   loadRefThumb(ref) {
     /* Rebuild a thumbnail for a saved picture/subject ref from its input path. */
     if (!ref || !ref.file || ref.kind === "audio" || ref.kind === "video") return;
-    const parts = ref.file.split("/");
-    const filename = parts[parts.length - 1];
-    const subfolder = parts.slice(0, -1).join("/");
-    if (!filename) return;
     try {
-      const url = api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}`);
+      const url = this.viewUrl(ref.file);
       const img = new Image();
       img.onload = () => { ref.thumb = url; this.renderTimeline(); };
       img.src = url;
@@ -278,9 +316,11 @@ class ChaoticDirectorEditor {
         id: r.id, kind: r.kind, file: r.file, name: r.name, start: r.start,
         duration: r.duration, trim_start: r.trim_start, trim_end: r.trim_end,
         strength: r.strength, role: r.role, annotation: r.annotation,
-        tag_type: r.tag_type, use_soundtrack: r.use_soundtrack,
+        tag_type: r.tag_type, use_soundtrack: r.use_soundtrack, timed: r.timed,
       })),
       boundaries: this.state.boundaries,
+      render_in: this.renderIn,
+      render_out: this.renderOut,
     }, null, 1);
   }
 
@@ -290,6 +330,7 @@ class ChaoticDirectorEditor {
     }
     if (window.app && window.app.graph) window.app.graph.setDirtyCanvas(true, true);
     this.renderTimeline();
+    this.maybeRefreshLibrary();
   }
 
   /* ---------------- helpers ---------------- */
@@ -376,9 +417,16 @@ class ChaoticDirectorEditor {
     const btnImportVid = this.btn("⬆ Video", () => this.pickFiles("video"));
     const btnImportAud = this.btn("⬆ Audio", () => this.pickFiles("audio"));
     const btnProject = this.btn("Project", () => this.toggleProjectPanel());
+    const btnLibrary = this.btn("Library", () => this.toggleLibraryPanel());
+    const btnIn = this.btn("⏮ IN", () => this.setRenderIn());
+    const btnOut = this.btn("OUT ⏭", () => this.setRenderOut());
+    const btnClearRange = this.btn("✕ Range", () => this.clearRenderRange());
+    const btnSave = this.btn("Save", () => this.saveProject());
+    const btnLoad = this.btn("Load", () => this.loadProject());
     const btnCopy = this.btn("Copy JSON", () => this.copyJSON());
     const btnChunks = this.btn("Auto-chunk?", () => this.toggleChunkHint());
-    toolbar.append(btnAddShot, btnImportImg, btnImportVid, btnImportAud, btnProject, btnCopy, btnChunks);
+    toolbar.append(btnAddShot, btnImportImg, btnImportVid, btnImportAud, btnProject, btnLibrary,
+                   btnIn, btnOut, btnClearRange, btnSave, btnLoad, btnCopy, btnChunks);
     this.wrapper.appendChild(toolbar);
 
     /* project panel */
@@ -392,6 +440,23 @@ class ChaoticDirectorEditor {
     });
     this.buildProjectPanel();
     this.wrapper.appendChild(this.projectPanel);
+
+    /* reference library (untimed refs — never part of the timeline) */
+    this.libraryPanel = document.createElement("div");
+    this.libraryPanel.className = "chaotic-collapse";
+    this.libraryPanel.innerHTML = `
+      <div class="chaotic-collapse-head"><span>Reference library</span><span style="color:#666">▾</span></div>
+      <div class="chaotic-collapse-body"></div>`;
+    this.libraryPanel.querySelector(".chaotic-collapse-head").addEventListener("click", () => {
+      this.libraryPanel.classList.toggle("open");
+      this.recomputeSize();
+    });
+    this.buildLibraryPanel();
+    this.wrapper.appendChild(this.libraryPanel);
+
+    /* scrub preview strip */
+    this.buildPreviewStrip();
+    this.wrapper.appendChild(this.previewPanel);
 
     /* timeline viewport */
     this.viewport = document.createElement("div");
@@ -470,7 +535,7 @@ class ChaoticDirectorEditor {
       const d = document.createElement("div");
       d.textContent = f;
       d.className = p.format === f ? "on" : "";
-      d.addEventListener("click", () => { p.format = f; this.commitChanges(); });
+      d.addEventListener("click", () => { p.format = f; this.commitChanges(); this.buildProjectPanel(); });
       seg.appendChild(d);
     });
     fmtRow.appendChild(seg);
@@ -603,7 +668,7 @@ class ChaoticDirectorEditor {
       const d = document.createElement("div");
       d.textContent = f;
       d.className = shot.format === f ? "on" : "";
-      d.addEventListener("click", () => { shot.format = f; this.commitChanges(); });
+      d.addEventListener("click", () => { shot.format = f; this.commitChanges(); this.buildInspector(); });
       seg.appendChild(d);
     });
     fmtRow.appendChild(seg);
@@ -785,6 +850,35 @@ class ChaoticDirectorEditor {
     fileRow.className = "chaotic-row";
     fileRow.innerHTML = `<span class="chaotic-label" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(ref.file)}">${escapeHtml(ref.file || "no file")}</span>`;
     ins.appendChild(fileRow);
+
+    /* preview + placement */
+    if (ref.kind !== "audio") {
+      const prevRow = document.createElement("div");
+      prevRow.className = "chaotic-row";
+      const prevBtn = this.btn("▶ Preview", () => this.previewRef(ref.id));
+      prevRow.appendChild(prevBtn);
+      ins.appendChild(prevRow);
+    }
+    const placeRow = document.createElement("div");
+    placeRow.className = "chaotic-row";
+    placeRow.innerHTML = '<span class="chaotic-label">Placement</span>';
+    const placeSeg = document.createElement("div");
+    placeSeg.className = "chaotic-seg";
+    [["timeline", "Timeline"], ["library", "Library"]].forEach(([v, l]) => {
+      const d = document.createElement("div");
+      d.textContent = l;
+      d.className = (ref.timed && v === "timeline") || (!ref.timed && v === "library") ? "on" : "";
+      d.addEventListener("click", () => {
+        if (v === "timeline") {
+          if (!ref.timed) this.placeRefOnTimeline(ref.id);
+        } else {
+          this.moveRefToLibrary(ref.id);
+        }
+      });
+      placeSeg.appendChild(d);
+    });
+    placeRow.appendChild(placeSeg);
+    ins.appendChild(placeRow);
 
     const kindRow = document.createElement("div");
     kindRow.className = "chaotic-row";
@@ -1010,8 +1104,18 @@ class ChaoticDirectorEditor {
       ctx.stroke();
     });
 
+    /* render window: shade everything outside [renderIn, renderOut) */
+    if (this.renderIn != null || this.renderOut != null) {
+      const xIn = this.renderIn != null ? (this.renderIn / total) * w : 0;
+      const xOut = this.renderOut != null ? (this.renderOut / total) * w : w;
+      ctx.fillStyle = "rgba(0,0,0,.42)";
+      if (xIn > 0) ctx.fillRect(0, RULER_H, xIn, h - RULER_H);
+      if (xOut < w) ctx.fillRect(xOut, RULER_H, w - xOut, h - RULER_H);
+    }
+
     /* refs */
     this.state.refs.forEach(ref => {
+      if (!ref.timed) return;
       const y = this.refTrackY(ref);
       this.drawRefBlock(ctx, ref, y, total, w);
     });
@@ -1028,6 +1132,65 @@ class ChaoticDirectorEditor {
       const y = this.trackYForKind(this._ghost.kind);
       ctx.strokeRect(this._ghost.x0, y + 4, this._ghost.x1 - this._ghost.x0, TRACK_H - 8);
       ctx.setLineDash([]);
+    }
+
+    /* render window IN / OUT markers */
+    if (this.renderIn != null) {
+      const x = (this.renderIn / total) * w;
+      ctx.strokeStyle = "#4aa47f";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, RULER_H);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+      ctx.fillStyle = "#1f3a2c";
+      ctx.fillRect(x - 14, RULER_H, 28, 12);
+      ctx.fillStyle = "#7ee2a8";
+      ctx.font = "bold 8px ui-monospace, Menlo, monospace";
+      ctx.fillText("IN", x - 6, RULER_H + 9);
+    }
+    if (this.renderOut != null) {
+      const x = (this.renderOut / total) * w;
+      ctx.strokeStyle = "#e0665f";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, RULER_H);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+      ctx.fillStyle = "#3a1f1f";
+      ctx.fillRect(x - 16, RULER_H, 30, 12);
+      ctx.fillStyle = "#ff8f8f";
+      ctx.font = "bold 8px ui-monospace, Menlo, monospace";
+      ctx.fillText("OUT", x - 8, RULER_H + 9);
+    }
+
+    /* playhead */
+    if (this.playhead != null) {
+      const x = (this.playhead / total) * w;
+      ctx.strokeStyle = "#ff5a5a";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, RULER_H - 4);
+      ctx.lineTo(x, h);
+      ctx.stroke();
+      ctx.fillStyle = "#ff5a5a";
+      ctx.beginPath();
+      ctx.moveTo(x, RULER_H - 7);
+      ctx.lineTo(x - 4, RULER_H - 1);
+      ctx.lineTo(x + 4, RULER_H - 1);
+      ctx.closePath();
+      ctx.fill();
+      ctx.lineWidth = 1;
+    }
+
+    /* render window label (ruler, right side) */
+    const rangeLabel = this.renderRangeLabel();
+    if (rangeLabel) {
+      ctx.fillStyle = "#ffd479";
+      ctx.font = "bold 9px ui-monospace, Menlo, monospace";
+      let labelW = 96;
+      try { const m = ctx.measureText(rangeLabel); if (m && m.width) labelW = m.width; } catch (e) { /* keep fallback */ }
+      ctx.fillText(rangeLabel, w - labelW - 6, RULER_H - 8);
     }
   }
 
@@ -1123,7 +1286,14 @@ class ChaoticDirectorEditor {
     ctx.font = "9px ui-monospace, Menlo, monospace";
     const idx = this.state.shots.filter(s => s.start < shot.start || (s.start === shot.start && s._index < shot._index)).length + 1;
     const snippet = shot.text.replace(/[\n\r]+/g, " ").slice(0, 60);
+    const fmtBadge = shot.format && shot.format !== "auto" ? ` · ${shot.format}` : "";
     ctx.fillText(`[Shot ${idx}] ${snippet}`, x0 + 5, y + 20);
+    if (fmtBadge) {
+      ctx.fillStyle = shot.format === "narrative" ? "#ffd479" : "#9fd6ff";
+      ctx.font = "8px ui-monospace, Menlo, monospace";
+      const btx = x0 + 5 + ctx.measureText(`[Shot ${idx}] ${snippet}`).width + 4;
+      ctx.fillText(fmtBadge.trim(), btx, y + 19);
+    }
     ctx.fillStyle = "#8a7a82";
     ctx.fillText(`${fmtSec(shot.duration)}s`, x1 - 34, y + 20);
 
@@ -1153,6 +1323,12 @@ class ChaoticDirectorEditor {
   hitTest(x, y) {
     const total = this.duration * this.zoom;
     const w = this.canvas.clientWidth || 1;
+    /* ruler: render window handles, then scrub playhead */
+    if (y < RULER_H) {
+      if (this.renderIn != null && Math.abs(x - (this.renderIn / total) * w) < 9) return { type: "render-in" };
+      if (this.renderOut != null && Math.abs(x - (this.renderOut / total) * w) < 9) return { type: "render-out" };
+      return { type: "playhead" };
+    }
     /* chunk boundary handles */
     for (const b of this.state.boundaries) {
       const bx = (b / total) * w;
@@ -1161,6 +1337,7 @@ class ChaoticDirectorEditor {
     /* refs */
     for (let i = this.state.refs.length - 1; i >= 0; i--) {
       const ref = this.state.refs[i];
+      if (!ref.timed) continue;
       const ry = this.refTrackY(ref);
       if (y < ry || y > ry + TRACK_H) continue;
       const x0 = (ref.start / total) * w;
@@ -1193,6 +1370,20 @@ class ChaoticDirectorEditor {
       this.renderTimeline();
       return;
     }
+    if (hit.type === "playhead") {
+      const sec = clamp(this.secondsAt(x), 0, this.duration);
+      this._drag = { mode: "playhead" };
+      this.setPlayhead(sec);
+      return;
+    }
+    if (hit.type === "render-in") {
+      this._drag = { mode: "render-in" };
+      return;
+    }
+    if (hit.type === "render-out") {
+      this._drag = { mode: "render-out" };
+      return;
+    }
     if (hit.type === "boundary") {
       this._drag = { mode: "boundary", startX: e.clientX, orig: hit.value };
       return;
@@ -1223,6 +1414,22 @@ class ChaoticDirectorEditor {
     const w = this.canvas.clientWidth || 1;
     const sec = clamp((x / w) * total, 0, total);
 
+    if (this._drag.mode === "playhead") {
+      this.setPlayhead(clamp(sec, 0, this.duration));
+      return;
+    }
+    if (this._drag.mode === "render-in") {
+      const max = this.renderOut != null ? this.renderOut : this.duration;
+      this.renderIn = Math.max(0, Math.min(clamp(sec, 0, this.duration), max));
+      this.commitChanges();
+      return;
+    }
+    if (this._drag.mode === "render-out") {
+      const min = this.renderIn != null ? this.renderIn : 0;
+      this.renderOut = Math.min(this.duration, Math.max(clamp(sec, 0, this.duration), min));
+      this.commitChanges();
+      return;
+    }
     if (this._drag.mode === "boundary") {
       const snapped = this.snapToBoundary(sec);
       this._drag.orig = snapped;
@@ -1309,6 +1516,7 @@ class ChaoticDirectorEditor {
     e.preventDefault();
     e.stopPropagation();
     if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+    if (e.target && this.libraryPanel && this.libraryPanel.contains(e.target)) return;
     const rect = this.wrapper.getBoundingClientRect();
     const y = e.clientY - rect.top;
     const kind = this.trackForY(y) === "audio" ? "audio" : this.trackForY(y) === "video" ? "video" : "picture";
@@ -1326,17 +1534,23 @@ class ChaoticDirectorEditor {
   onDrop(e) {
     e.preventDefault();
     e.stopPropagation();
+    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if (e.target && this.libraryPanel && this.libraryPanel.contains(e.target)) {
+      /* dropped onto the reference library → untimed ref */
+      this._ghost = null;
+      files.forEach(f => this.importFile(f, this.kindOfFile(f), null, true));
+      return;
+    }
     const rect = this.wrapper.getBoundingClientRect();
     const y = e.clientY - rect.top;
     const kind = this.trackForY(y) === "audio" ? "audio" : this.trackForY(y) === "video" ? "video" : "picture";
     this._ghost = null;
     const { x } = this.getMousePos(e);
     const start = Math.max(0, this.secondsAt(x));
-    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
     files.forEach(f => this.importFile(f, kind, start));
   }
 
-  async importFile(file, kind, start) {
+  async importFile(file, kind, start, asLibrary) {
     try {
       const body = new FormData();
       body.append("image", file);
@@ -1352,10 +1566,11 @@ class ChaoticDirectorEditor {
         kind,
         file: path,
         name: file.name,
-        start: start != null ? start : this.duration,
+        start: asLibrary ? 0 : (start != null ? start : this.duration),
         duration: 3,
         tag_type: kind === "picture" ? "picture" : kind === "subject" ? "subject" : undefined,
         role: "reference",
+        timed: !asLibrary,
       }, this.state.refs.length);
 
       if (kind === "picture" || kind === "subject") {
@@ -1371,6 +1586,10 @@ class ChaoticDirectorEditor {
         await this.probeAudio(file, ref);
         this.state.refs.push(ref);
         this.commitChanges();
+      }
+      if (asLibrary) {
+        this.updateStatus("Added to reference library.");
+        return;
       }
       this.selectedType = "ref";
       this.selectedId = ref.id;
@@ -1470,6 +1689,520 @@ class ChaoticDirectorEditor {
     }
   }
 
+  /* ---------------- reference library ---------------- */
+  toggleLibraryPanel() {
+    this.libraryPanel.classList.toggle("open");
+    if (this.libraryPanel.classList.contains("open")) {
+      this.buildLibraryPanel();
+      this.refreshLibraryGrid();
+    }
+    this.recomputeSize();
+  }
+
+  buildLibraryPanel() {
+    const body = this.libraryPanel.querySelector(".chaotic-collapse-body");
+    body.innerHTML = "";
+    const drop = document.createElement("div");
+    drop.className = "chaotic-lib-drop";
+    drop.textContent = "Drop images / videos / audio here — they become library references, never part of the timeline.";
+    drop.addEventListener("click", () => this.pickAnyFiles());
+    drop.addEventListener("dragover", e => {
+      e.preventDefault();
+      e.stopPropagation();
+      drop.classList.add("drag-over");
+      this._ghost = null;
+      this.renderTimeline();
+    });
+    drop.addEventListener("dragleave", () => drop.classList.remove("drag-over"));
+    drop.addEventListener("drop", e => {
+      e.preventDefault();
+      e.stopPropagation();
+      drop.classList.remove("drag-over");
+      const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+      files.forEach(f => this.importFile(f, this.kindOfFile(f), null, true));
+    });
+    body.appendChild(drop);
+    const hint = document.createElement("div");
+    hint.className = "chaotic-lib-hint";
+    hint.textContent = "Library refs are always available to every shot as <Picture N>/<Video N>/<Audio N> — use them to keep look-and-feel consistent without cluttering the timeline.";
+    body.appendChild(hint);
+    this.libraryGrid = document.createElement("div");
+    this.libraryGrid.className = "chaotic-lib-grid";
+    body.appendChild(this.libraryGrid);
+    this._librarySig = null;
+    this.refreshLibraryGrid();
+  }
+
+  kindOfFile(file) {
+    if (!file || !file.type) return "picture";
+    if (file.type.startsWith("video/")) return "video";
+    if (file.type.startsWith("audio/")) return "audio";
+    return "picture";
+  }
+
+  pickAnyFiles() {
+    this.fileInput.accept = "image/*,video/*,audio/*";
+    this.fileInput.onchange = () => {
+      const files = Array.from(this.fileInput.files || []);
+      files.forEach(f => this.importFile(f, this.kindOfFile(f), null, true));
+      this.fileInput.value = "";
+    };
+    this.fileInput.click();
+  }
+
+  refreshLibraryGrid() {
+    if (!this.libraryGrid) return;
+    const untimed = this.state.refs.filter(r => !r.timed);
+    const sig = untimed.map(r => r.id).join(",");
+    if (sig === this._librarySig) return;
+    this._librarySig = sig;
+    this.libraryGrid.innerHTML = "";
+    if (untimed.length === 0) {
+      const empty = document.createElement("div");
+      empty.className = "chaotic-lib-empty";
+      empty.textContent = "No library references yet.";
+      this.libraryGrid.appendChild(empty);
+      return;
+    }
+    const tags = this.globalTags();
+    untimed.forEach(ref => {
+      const card = document.createElement("div");
+      card.className = "chaotic-lib-card";
+      let thumb;
+      if (ref.kind === "audio") {
+        thumb = document.createElement("canvas");
+        thumb.className = "chaotic-lib-thumb";
+        thumb.width = 52;
+        thumb.height = 34;
+        this.drawWaveform(thumb, ref.peaks || this.fakePeaks());
+      } else {
+        thumb = document.createElement("img");
+        thumb.className = "chaotic-lib-thumb";
+        thumb.alt = "";
+        if (ref.thumb) thumb.src = ref.thumb;
+        else if (ref.file) thumb.src = this.viewUrl(ref.file);
+      }
+      const meta = document.createElement("div");
+      meta.className = "chaotic-lib-meta";
+      const name = document.createElement("div");
+      name.className = "chaotic-lib-name";
+      name.textContent = (ref.name || ref.file || ref.kind) + (ref.kind === "video" && ref.role === "source" ? " · [edit]" : "");
+      name.title = ref.file || ref.name || "";
+      const tag = document.createElement("div");
+      tag.className = "chaotic-lib-tag";
+      const gtag = tags[ref.id] || (ref.kind === "subject" ? (this.shorthands()[ref.id] || "") : "");
+      tag.textContent = gtag + (ref.kind === "subject" && this.shorthands()[ref.id] ? " / " + this.shorthands()[ref.id] : "");
+      meta.appendChild(name);
+      meta.appendChild(tag);
+      const strength = document.createElement("input");
+      strength.className = "chaotic-lib-strength";
+      strength.type = "range";
+      strength.min = "0";
+      strength.max = "1";
+      strength.step = "0.05";
+      strength.value = ref.strength;
+      strength.title = "Strength: " + ref.strength.toFixed(2);
+      strength.addEventListener("input", () => {
+        ref.strength = Number(strength.value);
+        strength.title = "Strength: " + ref.strength.toFixed(2);
+        this.commitChanges();
+      });
+      const placeBtn = document.createElement("button");
+      placeBtn.className = "chaotic-btn";
+      placeBtn.textContent = "Place ▸";
+      placeBtn.title = "Place on the timeline at the playhead";
+      placeBtn.addEventListener("click", () => this.placeRefOnTimeline(ref.id));
+      const del = document.createElement("button");
+      del.className = "chaotic-btn danger";
+      del.textContent = "✕";
+      del.addEventListener("click", () => {
+        this.state.refs = this.state.refs.filter(r => r.id !== ref.id);
+        if (this.selectedId === ref.id) { this.selectedId = null; this.selectedType = null; }
+        this.commitChanges();
+        this.buildInspector();
+      });
+      card.appendChild(thumb);
+      card.appendChild(meta);
+      card.appendChild(strength);
+      card.appendChild(placeBtn);
+      card.appendChild(del);
+      this.libraryGrid.appendChild(card);
+    });
+  }
+
+  maybeRefreshLibrary() {
+    const untimed = this.state.refs.filter(r => !r.timed);
+    const sig = untimed.map(r => r.id).join(",");
+    if (sig !== this._librarySig) this.refreshLibraryGrid();
+  }
+
+  moveRefToLibrary(id) {
+    const ref = this.refById(id);
+    if (!ref) return;
+    ref.timed = false;
+    this.commitChanges();
+    this.buildInspector();
+  }
+
+  placeRefOnTimeline(id) {
+    const ref = this.refById(id);
+    if (!ref) return;
+    const start = this.playhead != null ? Math.max(0, this.playhead) : 0;
+    ref.timed = true;
+    ref.start = Math.max(0, Math.min(start, Math.max(0, this.duration - 0.5)));
+    ref.duration = Math.max(ref.duration, 3);
+    this.selectedType = "ref";
+    this.selectedId = ref.id;
+    this.commitChanges();
+    this.buildInspector();
+  }
+
+  /* ---------------- scrub preview ---------------- */
+  buildPreviewStrip() {
+    this.previewPanel = document.createElement("div");
+    this.previewPanel.className = "chaotic-panel";
+    const title = document.createElement("div");
+    title.className = "chaotic-panel-title";
+    const titleSpan = document.createElement("span");
+    titleSpan.textContent = "Preview / Scrub";
+    this.previewLabel = document.createElement("span");
+    this.previewLabel.style.color = "#9fd6ff";
+    this.previewLabel.textContent = "";
+    title.appendChild(titleSpan);
+    title.appendChild(this.previewLabel);
+    this.previewPanel.appendChild(title);
+
+    this.previewStage = document.createElement("div");
+    this.previewStage.className = "chaotic-preview-stage";
+    this.previewVideo = document.createElement("video");
+    this.previewVideo.muted = true;
+    this.previewVideo.playsInline = true;
+    this.previewVideo.preload = "auto";
+    this.previewVideo.style.display = "none";
+    this.previewImg = document.createElement("img");
+    this.previewImg.alt = "";
+    this.previewImg.style.display = "none";
+    this.previewHint = document.createElement("div");
+    this.previewHint.className = "chaotic-preview-hint";
+    this.previewHint.textContent = "Drag on the ruler to scrub — the video / picture under the playhead appears here. Select a ref and press Preview to jump.";
+    this.previewStage.appendChild(this.previewVideo);
+    this.previewStage.appendChild(this.previewImg);
+    this.previewStage.appendChild(this.previewHint);
+    this.previewPanel.appendChild(this.previewStage);
+
+    const controls = document.createElement("div");
+    controls.className = "chaotic-preview-controls";
+    this.previewPlayBtn = document.createElement("button");
+    this.previewPlayBtn.className = "chaotic-play-btn";
+    this.previewPlayBtn.textContent = "▶";
+    this.previewPlayBtn.addEventListener("click", () => this.togglePreviewPlay());
+    this.previewSeek = document.createElement("input");
+    this.previewSeek.className = "chaotic-preview-seek";
+    this.previewSeek.type = "range";
+    this.previewSeek.min = "0";
+    this.previewSeek.max = "100";
+    this.previewSeek.value = "0";
+    this.previewSeek.addEventListener("input", () => this.onPreviewSeek());
+    this.previewTime = document.createElement("span");
+    this.previewTime.className = "chaotic-preview-time";
+    this.previewTime.textContent = "--:--.--- / --:--.---";
+    controls.appendChild(this.previewPlayBtn);
+    controls.appendChild(this.previewSeek);
+    controls.appendChild(this.previewTime);
+    this.previewPanel.appendChild(controls);
+
+    this.previewVideo.addEventListener("timeupdate", () => this.onPreviewTime());
+    this.previewVideo.addEventListener("loadedmetadata", () => this.onPreviewMetadata());
+    this.previewVideo.addEventListener("play", () => this.previewPlayBtn.classList.add("playing"));
+    this.previewVideo.addEventListener("pause", () => this.previewPlayBtn.classList.remove("playing"));
+  }
+
+  previewRefForPlayhead(sec) {
+    if (sec == null) return null;
+    for (let i = this.state.refs.length - 1; i >= 0; i--) {
+      const ref = this.state.refs[i];
+      if (!ref.timed) continue;
+      if (ref.kind !== "video" && ref.kind !== "picture" && ref.kind !== "subject") continue;
+      if (sec >= ref.start - 1e-6 && sec < ref.start + ref.duration + 1e-6) return ref;
+    }
+    return null;
+  }
+
+  updatePreview() {
+    const sec = this.playhead;
+    const ref = this.previewRefForPlayhead(sec);
+    if (!ref) {
+      this._previewRefId = null;
+      if (this.previewVideo.src) this.previewVideo.pause();
+      this.previewVideo.style.display = "none";
+      this.previewImg.style.display = "none";
+      this.previewHint.style.display = "block";
+      this.previewLabel.textContent = "";
+      this.previewTime.textContent = "--:--.--- / --:--.---";
+      this.previewSeek.value = "0";
+      this.previewPlayBtn.classList.remove("playing");
+      return;
+    }
+    const tags = this.globalTags();
+    this.previewLabel.textContent = (tags[ref.id] || "") + " · " + (ref.name || ref.file || "");
+    this.previewHint.style.display = "none";
+
+    if (ref.kind === "video") {
+      this.previewImg.style.display = "none";
+      this.previewVideo.style.display = "block";
+      if (this._previewRefId !== ref.id) {
+        this._previewRefId = ref.id;
+        const url = this.viewUrl(ref.file);
+        if (url) {
+          this.previewVideo.src = url;
+          this.previewVideo.load();
+        }
+      }
+      const trimStart = Number(ref.trim_start) || 0;
+      const mediaEnd = ref.trim_end != null ? Number(ref.trim_end) : trimStart + ref.duration;
+      const target = trimStart + (sec - ref.start);
+      if (this.previewVideo.duration && !Number.isNaN(this.previewVideo.duration)) {
+        const clamped = clamp(target, trimStart, mediaEnd);
+        if (Math.abs(this.previewVideo.currentTime - clamped) > 0.05) {
+          this.previewVideo.currentTime = clamped;
+        }
+        this.previewSeek.max = Math.max(0, mediaEnd - trimStart);
+        this.previewSeek.value = String(clamp(clamped - trimStart, 0, mediaEnd - trimStart));
+        this.updatePreviewTime(clamped, mediaEnd);
+      }
+    } else if (ref.kind === "picture" || ref.kind === "subject") {
+      this._previewRefId = null; // stills have no video timeline — don't leave a stale play target
+      this.previewVideo.pause();
+      this.previewVideo.style.display = "none";
+      this.previewImg.style.display = "block";
+      const src = ref.thumb || this.viewUrl(ref.file);
+      if (this.previewImg.src !== src) this.previewImg.src = src;
+      this.previewSeek.max = "0";
+      this.previewSeek.value = "0";
+      this.previewTime.textContent = "still frame";
+    }
+  }
+
+  updatePreviewTime(mediaSec, mediaEnd) {
+    this.previewTime.textContent = fmtTimestamp(mediaSec) + " / " + fmtTimestamp(mediaEnd);
+  }
+
+  onPreviewMetadata() {
+    const ref = this._previewRefId ? this.refById(this._previewRefId) : null;
+    if (!ref || !this.previewVideo.duration) return;
+    const trimStart = Number(ref.trim_start) || 0;
+    const mediaEnd = ref.trim_end != null ? Number(ref.trim_end) : Math.min(trimStart + ref.duration, this.previewVideo.duration);
+    this.previewSeek.max = Math.max(0, mediaEnd - trimStart);
+    if (this.playhead != null && ref.timed) {
+      const target = clamp(trimStart + (this.playhead - ref.start), trimStart, mediaEnd);
+      this.previewVideo.currentTime = target;
+      this.updatePreviewTime(target, mediaEnd);
+      this.previewSeek.value = String(Math.max(0, target - trimStart));
+    }
+  }
+
+  onPreviewTime() {
+    const ref = this._previewRefId ? this.refById(this._previewRefId) : null;
+    if (!ref || ref.kind !== "video") return;
+    const trimStart = Number(ref.trim_start) || 0;
+    const mediaEnd = ref.trim_end != null ? Number(ref.trim_end) : trimStart + ref.duration;
+    if (this.previewVideo.currentTime >= mediaEnd - 0.03) {
+      this.previewVideo.pause();
+      this.previewVideo.currentTime = trimStart;
+      this.previewSeek.value = "0";
+      return;
+    }
+    if (this.previewVideo.paused) {
+      /* paused: scrub already set currentTime — keep display in sync */
+      this.previewSeek.value = String(Math.max(0, this.previewVideo.currentTime - trimStart));
+      this.updatePreviewTime(this.previewVideo.currentTime, mediaEnd);
+      return;
+    }
+    /* playing: follow the frame onto the timeline playhead */
+    if (ref.timed && (!this._drag || this._drag.mode !== "playhead")) {
+      this.playhead = ref.start + (this.previewVideo.currentTime - trimStart);
+      this.renderTimeline();
+    }
+    this.previewSeek.value = String(Math.max(0, this.previewVideo.currentTime - trimStart));
+    this.updatePreviewTime(this.previewVideo.currentTime, mediaEnd);
+  }
+
+  onPreviewSeek() {
+    const ref = this._previewRefId ? this.refById(this._previewRefId) : null;
+    if (!ref || ref.kind !== "video") return;
+    const trimStart = Number(ref.trim_start) || 0;
+    const mediaEnd = ref.trim_end != null ? Number(ref.trim_end) : trimStart + ref.duration;
+    const t = clamp(trimStart + Number(this.previewSeek.value || 0), trimStart, mediaEnd);
+    this.previewVideo.currentTime = t;
+    if (ref.timed) {
+      this.playhead = ref.start + (t - trimStart);
+      this.renderTimeline();
+    }
+    this.updatePreviewTime(t, mediaEnd);
+  }
+
+  togglePreviewPlay() {
+    if (!this._previewRefId) return;
+    const ref = this.refById(this._previewRefId);
+    if (!ref || ref.kind !== "video") return;
+    if (this.previewVideo.paused) {
+      this.previewVideo.play().catch(() => {});
+    } else {
+      this.previewVideo.pause();
+    }
+  }
+
+  previewRef(id) {
+    const ref = this.refById(id);
+    if (!ref) return;
+    if (ref.timed) {
+      this.setPlayhead(ref.start + 0.05);
+    } else {
+      /* library video: preview standalone from its trim window */
+      this._previewRefId = ref.id;
+      this.previewHint.style.display = "none";
+      this.previewImg.style.display = "none";
+      this.previewVideo.style.display = "block";
+      const url = this.viewUrl(ref.file);
+      if (url) {
+        this.previewVideo.src = url;
+        this.previewVideo.load();
+      }
+      const tags = this.globalTags();
+      this.previewLabel.textContent = (tags[ref.id] || "") + " · " + (ref.name || ref.file || "");
+    }
+  }
+
+  /* ---------------- playhead + render window ---------------- */
+  setPlayhead(sec) {
+    this.playhead = clamp(sec, 0, this.duration);
+    this.updatePreview();
+    this.renderTimeline();
+  }
+
+  setRenderIn() {
+    if (this.playhead == null) {
+      this.updateStatus("Drag on the ruler to set the playhead, then press IN.");
+      return;
+    }
+    this.renderIn = clamp(this.playhead, 0, this.renderOut != null ? this.renderOut : this.duration);
+    if (this.renderOut != null && this.renderIn >= this.renderOut) this.renderIn = Math.max(0, this.renderOut - 0.05);
+    this.commitChanges();
+  }
+
+  setRenderOut() {
+    if (this.playhead == null) {
+      this.updateStatus("Drag on the ruler to set the playhead, then press OUT.");
+      return;
+    }
+    this.renderOut = clamp(this.playhead, this.renderIn != null ? this.renderIn : 0, this.duration);
+    if (this.renderIn != null && this.renderOut <= this.renderIn) this.renderOut = Math.min(this.duration, this.renderIn + 0.05);
+    this.commitChanges();
+  }
+
+  clearRenderRange() {
+    this.renderIn = null;
+    this.renderOut = null;
+    this.commitChanges();
+    this.updateStatus("Render window cleared — full timeline will render.");
+  }
+
+  renderRangeLabel() {
+    if (this.renderIn == null && this.renderOut == null) return "";
+    const from = this.renderIn != null ? fmtSec(this.renderIn) + "s" : "0s";
+    const to = this.renderOut != null ? fmtSec(this.renderOut) + "s" : "end";
+    return `RENDER ${from} → ${to}`;
+  }
+
+  /* ---------------- project save / load ---------------- */
+  viewUrl(file) {
+    if (!file) return "";
+    const parts = file.split("/");
+    const filename = parts[parts.length - 1];
+    const subfolder = parts.slice(0, -1).join("/");
+    return api.apiURL(`/view?filename=${encodeURIComponent(filename)}&type=input&subfolder=${encodeURIComponent(subfolder)}`);
+  }
+
+  async saveProject() {
+    const payload = this.serialize();
+    try {
+      if (window.showSaveFilePicker) {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: "chaotic_h3_project.json",
+          types: [{ description: "Chaotic H3 Director project", accept: { "application/json": [".json"] } }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(payload);
+        await writable.close();
+        this.updateStatus("Project saved.");
+      } else {
+        const blob = new Blob([payload], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement("a");
+        a.href = url;
+        a.download = "chaotic_h3_project.json";
+        a.click();
+        URL.revokeObjectURL(url);
+        this.updateStatus("Project downloaded.");
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") console.error("[ChaoticDirector] save failed", e);
+    }
+  }
+
+  async loadProject() {
+    const apply = text => {
+      try {
+        const data = JSON.parse(text);
+        let raw = data;
+        if (data && typeof data === "object" && data.timeline && typeof data.timeline === "object") raw = data.timeline;
+        if (typeof raw !== "object" || raw === null || !Array.isArray(raw.shots)) {
+          this.updateStatus("Load failed: not a Chaotic H3 project file.");
+          return;
+        }
+        this.applyLoaded(raw);
+      } catch (e) {
+        this.updateStatus("Load failed: " + (e && e.message ? e.message : e));
+      }
+    };
+    try {
+      if (window.showOpenFilePicker) {
+        const [handle] = await window.showOpenFilePicker({
+          types: [{ description: "Chaotic H3 Director project", accept: { "application/json": [".json"] } }],
+          multiple: false,
+        });
+        const file = await handle.getFile();
+        apply(await file.text());
+      } else {
+        const input = document.createElement("input");
+        input.type = "file";
+        input.accept = ".json,application/json";
+        input.onchange = () => {
+          const file = input.files && input.files[0];
+          if (!file) return;
+          const reader = new FileReader();
+          reader.onload = ev => apply(ev.target.result);
+          reader.readAsText(file);
+        };
+        input.click();
+      }
+    } catch (e) {
+      if (e.name !== "AbortError") console.error("[ChaoticDirector] load failed", e);
+    }
+  }
+
+  applyLoaded(raw) {
+    this.selectedId = null;
+    this.selectedType = null;
+    this._applyState(raw);
+    this._librarySig = null;
+    this._previewRefId = null;
+    this.refreshLibraryGrid();
+    this.buildProjectPanel();
+    this.commitChanges();
+    this.updateStatus("Project loaded.");
+  }
+
   recomputeSize() {
     if (this.domWidget && this.domWidget.computeSize) this.domWidget.computeSize();
     if (window.app && window.app.graph) window.app.graph.setDirtyCanvas(true, true);
@@ -1502,7 +2235,9 @@ app.registerExtension({
         const width = Math.max(700, (self.size && self.size[0]) || 1100);
         const inspectorH = self._chaoticEditor && self._chaoticEditor.inspector.style.display !== "none" ? 300 : 0;
         const projectH = self._chaoticEditor && self._chaoticEditor.projectPanel.classList.contains("open") ? 560 : 36;
-        return [Math.max(10, width - 24), TIMELINE_H + 120 + inspectorH + projectH];
+        const libraryH = self._chaoticEditor && self._chaoticEditor.libraryPanel && self._chaoticEditor.libraryPanel.classList.contains("open")
+          ? 180 : 40;
+        return [Math.max(10, width - 24), TIMELINE_H + 120 + PREVIEW_H + inspectorH + projectH + libraryH];
       };
 
       /* init editor after widgets are finalized */
