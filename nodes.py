@@ -1,0 +1,324 @@
+"""Chaotic MinimaxH3 Director — ComfyUI node classes.
+
+ChaoticDirector: the timeline orchestrator.  Renders the whole authored scene
+one VRAM-safe chunk at a time (strict unload/reload between chunks), stitches
+the result into one continuous clip, and outputs IMAGE + AUDIO exactly like
+the reference workflow's VAEDecode + VAEDecodeAudio chain, so the standard
+CreateVideo / SaveVideo nodes consume it unchanged.
+
+ChaoticPromptAssembler: pure, no-model companion node that shows the exact
+per-chunk prompts the Director would emit — for testing prompt quality without
+spending a single GPU cycle.
+"""
+
+from __future__ import annotations
+
+import copy
+import json
+
+import comfy.samplers
+import nodes
+
+from .chunking import align_frame_count, build_tag_map, plan_chunks
+from .engine import ChunkRenderer
+from .prompt_assembly import assemble_chunk_prompt
+from .stitching import as_video_batch, stitch_chunks
+from .timeline import (
+    assign_global_tags,
+    default_timeline_json,
+    parse_timeline,
+    timeline_issues,
+)
+from . import vrma
+
+
+def _log(message: str) -> None:
+    print(f"[Chaotic H3 Director] {message}", flush=True)
+
+
+def _sub_timeline_from(timeline, start_sec: float):
+    """A timeline copy covering only [start_sec, end), with times re-based."""
+    sub = copy.deepcopy(timeline)
+    sub.shots = [shot for shot in sub.shots if shot.end > start_sec + 1e-6]
+    for shot in sub.shots:
+        shot.start = max(0.0, shot.start - start_sec)
+    sub.refs = [ref for ref in sub.refs if ref.end > start_sec + 1e-6]
+    for ref in sub.refs:
+        ref.start = max(0.0, ref.start - start_sec)
+    sub.pinned_boundaries = [b - start_sec for b in sub.pinned_boundaries if b > start_sec + 1e-6]
+    return sub
+
+
+class ChaoticDirector:
+    """Full timeline → chunked render → stitched clip (see module docstring)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "model": ("MODEL",),
+                "clip": ("CLIP",),
+                "vae": ("VAE",),
+                "audio_vae": ("VAE",),
+                "seed": ("INT", {"default": 0, "min": 0, "max": 0xFFFFFFFFFFFFFFFF, "control_after_generate": True}),
+                "steps": ("INT", {"default": 8, "min": 1, "max": 1000}),
+                "cfg": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 20.0, "step": 0.1, "round": 0.01}),
+                "sampler_name": (comfy.samplers.KSampler.SAMPLERS, {"default": "exp_heun_2_x0_sde"}),
+                "scheduler": (comfy.samplers.KSampler.SCHEDULERS, {"default": "sgm_uniform"}),
+                "width": ("INT", {"default": 1344, "min": 32, "max": nodes.MAX_RESOLUTION, "step": 32}),
+                "height": ("INT", {"default": 768, "min": 32, "max": nodes.MAX_RESOLUTION, "step": 32}),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 120}),
+                "chunk_mode": (["fixed", "auto"], {"default": "fixed"}),
+                "chunk_seconds": ("FLOAT", {"default": 5.0, "min": 0.5, "max": 60.0, "step": 0.5}),
+                "continuity": (
+                    ["keyframe+picture", "picture", "keyframe", "none"],
+                    {
+                        "default": "keyframe+picture",
+                        "tooltip": (
+                            "How chunk seams are bridged. keyframe+picture: previous chunk's last "
+                            "frame is both a geometric I2VA keyframe (frame 0 is pixel-exact) and a "
+                            "<Picture N> ref. picture: ref only (softer, matches classic H3 workflows). "
+                            "keyframe: geometry only. none: no anchor, hard cut."
+                        ),
+                    },
+                ),
+                "video_context": ("BOOLEAN", {"default": False}),
+                "ref_image_size": (["match", "max"], {"default": "match"}),
+                "timeline_data": (
+                    "STRING",
+                    {"default": default_timeline_json(), "multiline": True, "hidden": True},
+                ),
+            },
+            "optional": {
+                "sampler": ("SAMPLER",),
+                "sigmas": ("SIGMAS",),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "STRING", "INT", "INT")
+    RETURN_NAMES = ("images", "audio", "chunk_prompts_json", "total_frames", "chunk_count")
+    FUNCTION = "render"
+    CATEGORY = "Chaotic/H3 Director"
+    DESCRIPTION = (
+        "Timeline-based MiniMax H3 director. Renders a full multi-shot scene as "
+        "sequential VRAM-safe chunks (with a full model unload + cache clear "
+        "between every chunk), auto-anchors each seam to the previous chunk's "
+        "final frame, and stitches the result into one continuous video+audio clip."
+    )
+
+    def render(
+        self,
+        model, clip, vae, audio_vae,
+        seed, steps, cfg, sampler_name, scheduler,
+        width, height, fps,
+        chunk_mode, chunk_seconds, continuity, video_context, ref_image_size,
+        timeline_data,
+        sampler=None, sigmas=None,
+    ):
+        fps = max(1, min(120, int(fps)))
+        timeline = parse_timeline(timeline_data)
+        for issue in timeline_issues(timeline):
+            _log(f"WARNING: {issue}")
+
+        if chunk_mode == "auto":
+            target_frames = vrma.choose_auto_frames(fps)
+            _log(
+                f"auto chunk sizing: {target_frames} frames (~{target_frames / fps:.2f}s) "
+                "- learned from this session's runs"
+            )
+        else:
+            target_frames = align_frame_count(max(5, int(round(float(chunk_seconds) * fps))))
+            _log(f"fixed chunk sizing: {target_frames} frames (~{target_frames / fps:.2f}s)")
+
+        plans = plan_chunks(timeline, target_frames, fps, continuity, video_context)
+        _log("planned chunks: " + ", ".join(
+            f"#{p.index + 1} start={p.start_sec:.2f}s frames={p.frames}" for p in plans
+        ))
+
+        global_tags = assign_global_tags(timeline)
+        renderer = ChunkRenderer(
+            model, clip, vae, audio_vae, width, height, fps,
+            sampler_obj=sampler, sampler_name=sampler_name, scheduler=scheduler,
+            steps=steps, cfg=cfg, ref_image_size=ref_image_size,
+            sigmas=sigmas,
+        )
+        use_keyframe = continuity in ("keyframe+picture", "keyframe")
+        drop_seam = use_keyframe
+        seed = int(seed)
+
+        completed = []
+        chunk_prompts = []
+        anchor_image = None
+        prev_chunk_frames = None
+        all_log = []
+        shrink_count = 0
+        current_plans = plans
+        failed_start: float = 0.0
+        total_chunks = len(plans)
+
+        while current_plans:
+            try:
+                for plan_chunk in current_plans:
+                    failed_start = plan_chunk.start_sec
+                    tag_map = build_tag_map(timeline, plan_chunk, global_tags)
+                    bundle = assemble_chunk_prompt(
+                        timeline, plan_chunk.index, plan_chunk.start_sec,
+                        plan_chunk.shots, plan_chunk.ref_entries,
+                        plan_chunk.anchor_tag, global_tags, tag_map,
+                    )
+                    chunk_prompts.append({
+                        "chunk": plan_chunk.index + 1,
+                        "start_sec": plan_chunk.start_sec,
+                        "duration_sec": plan_chunk.duration_sec,
+                        "frames": plan_chunk.frames,
+                        "prompt": bundle.prompt,
+                        "issues": bundle.issues + plan_chunk.issues,
+                    })
+                    for issue in bundle.issues + plan_chunk.issues:
+                        _log(f"  chunk {plan_chunk.index + 1}: {issue}")
+
+                    vrma.reset_peak_stats()
+                    result = renderer.render_chunk(
+                        plan_chunk, bundle.prompt, seed + plan_chunk.index,
+                        anchor_image, prev_chunk_frames if video_context else None,
+                        use_keyframe,
+                    )
+                    peak = vrma.peak_allocated_bytes()
+                    free, _ = vrma.probe_free_bytes()
+                    vrma.record_success(plan_chunk.frames, peak, free)
+                    all_log.extend(f"  chunk {plan_chunk.index + 1}: {line}" for line in result["log"])
+
+                    # Detach to CPU before the next chunk so VRAM returns to baseline.
+                    result["frames"] = result["frames"].detach().cpu()
+                    result["audio"]["waveform"] = result["audio"]["waveform"].detach().cpu()
+                    anchor_image = result["frames"][-1][None, ...]
+                    prev_chunk_frames = result["frames"]
+                    completed.append(result)
+
+                    _log(
+                        f"chunk {plan_chunk.index + 1}/{total_chunks} rendered OK "
+                        f"(peak {peak / 1e9:.2f} GB VRAM, free {free / 1e9:.2f} GB)"
+                        if free else f"chunk {plan_chunk.index + 1}/{total_chunks} rendered OK"
+                    )
+
+                    if plan_chunk is not current_plans[-1]:
+                        vrma.unload_for_next_chunk()
+                current_plans = []
+            except Exception as exc:
+                if not vrma.is_oom(exc) or shrink_count >= 2:
+                    _log(f"render failed: {exc}")
+                    raise
+                shrink_count += 1
+                _log(f"OUT OF MEMORY on chunk starting at {failed_start:.2f}s — shrinking chunks and retrying remaining timeline")
+                vrma.unload_for_next_chunk()
+                new_target = vrma.shrink_frames(target_frames)
+                target_frames = new_target
+                sub = _sub_timeline_from(timeline, failed_start)
+                new_plans = plan_chunks(sub, new_target, fps, continuity, video_context)
+                for index, plan_chunk in enumerate(new_plans):
+                    plan_chunk.index = len(completed) + index
+                current_plans = new_plans
+
+        stitched = stitch_chunks(completed, fps, drop_seam)
+        if stitched["dropped_seam_frames"]:
+            _log(
+                f"stitched {len(completed)} chunks into {stitched['frames'].shape[0]} frames "
+                f"(dropped {stitched['dropped_seam_frames']} seam duplicates)"
+            )
+        else:
+            _log(f"stitched {len(completed)} chunks into {stitched['frames'].shape[0]} frames")
+
+        total_frames = int(stitched["frames"].shape[0])
+        report = {
+            "chunks": chunk_prompts,
+            "total_frames": total_frames,
+            "total_seconds": round(total_frames / fps, 3),
+            "log": all_log,
+        }
+        return (
+            as_video_batch(stitched["frames"]),  # [1, F, H, W, 3] — VAEDecode convention
+            stitched["audio"],
+            json.dumps(report, ensure_ascii=False, indent=2),
+            total_frames,
+            len(chunk_prompts),
+        )
+
+
+class ChaoticPromptAssembler:
+    """Inspect the exact prompts the Director would emit, without rendering."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "timeline_data": (
+                    "STRING",
+                    {"default": default_timeline_json(), "multiline": True},
+                ),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 120}),
+                "chunk_seconds": ("FLOAT", {"default": 5.0, "min": 0.5, "max": 60.0, "step": 0.5}),
+                "continuity": (["keyframe+picture", "picture", "keyframe", "none"], {"default": "keyframe+picture"}),
+                "video_context": ("BOOLEAN", {"default": False}),
+                "format_override": (["from_timeline", "official", "narrative"], {"default": "from_timeline"}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "INT", "STRING")
+    RETURN_NAMES = ("assembled_prompt", "chunk_plan_json", "chunk_count", "issues")
+    FUNCTION = "assemble"
+    CATEGORY = "Chaotic/H3 Director"
+
+    def assemble(self, timeline_data, fps, chunk_seconds, continuity, video_context, format_override):
+        fps = max(1, min(120, int(fps)))
+        timeline = parse_timeline(timeline_data)
+        target_frames = align_frame_count(max(5, int(round(float(chunk_seconds) * fps))))
+        plans = plan_chunks(timeline, target_frames, fps, continuity, video_context)
+        global_tags = assign_global_tags(timeline)
+
+        assembled = []
+        plan_view = []
+        all_issues = list(timeline_issues(timeline))
+        for plan_chunk in plans:
+            fmt = None if format_override == "from_timeline" else format_override
+            tag_map = build_tag_map(timeline, plan_chunk, global_tags)
+            bundle = assemble_chunk_prompt(
+                timeline, plan_chunk.index, plan_chunk.start_sec,
+                plan_chunk.shots, plan_chunk.ref_entries,
+                plan_chunk.anchor_tag, global_tags, tag_map, fmt,
+            )
+            assembled.append({
+                "chunk": plan_chunk.index + 1,
+                "start_sec": plan_chunk.start_sec,
+                "duration_sec": plan_chunk.duration_sec,
+                "frames": plan_chunk.frames,
+                "prompt": bundle.prompt,
+                "issues": bundle.issues + plan_chunk.issues,
+            })
+            plan_view.append({
+                "chunk": plan_chunk.index + 1,
+                "start_sec": plan_chunk.start_sec,
+                "frames": plan_chunk.frames,
+                "shots": [shot.text[:80] for shot in plan_chunk.shots],
+                "refs": [entry.tag for entry in plan_chunk.ref_entries],
+                "anchor": plan_chunk.anchor_tag,
+            })
+            all_issues.extend(bundle.issues + plan_chunk.issues)
+
+        issues_text = "\n".join(all_issues) if all_issues else "No issues."
+        return (
+            json.dumps(assembled, ensure_ascii=False, indent=2),
+            json.dumps(plan_view, ensure_ascii=False, indent=2),
+            len(plans),
+            issues_text,
+        )
+
+
+NODE_CLASS_MAPPINGS = {
+    "ChaoticH3Director": ChaoticDirector,
+    "ChaoticH3PromptAssembler": ChaoticPromptAssembler,
+}
+
+NODE_DISPLAY_NAME_MAPPINGS = {
+    "ChaoticH3Director": "Chaotic H3 Director (Timeline)",
+    "ChaoticH3PromptAssembler": "Chaotic H3 Prompt Assembler",
+}

@@ -1,0 +1,50 @@
+# ------------------------------------------------------------------ #
+# Python
+# ------------------------------------------------------------------ #
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+venv/
+env/
+.coverage
+coverage.xml
+htmlcov/
+
+# ------------------------------------------------------------------ #
+# Generated workflow output (regenerate with tools/build_workflow.py)
+# The committed example workflow is kept so the README link works.
+# ------------------------------------------------------------------ #
+workflows/*
+!workflows/ChaoticDirector_H3.json
+
+# Render / media artifacts produced while testing the node pack
+*.mp4
+*.webm
+*.mkv
+*.mov
+*.wav
+*.flac
+output/
+temp/
+
+# ------------------------------------------------------------------ #
+# OS / editor junk
+# ------------------------------------------------------------------ #
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.swp
+*.swo
+*~
+.idea/
+.vscode/
+*.code-workspace
