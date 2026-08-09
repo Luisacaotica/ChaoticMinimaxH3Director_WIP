@@ -10,6 +10,7 @@ import pytest
 import torch
 
 from ChaoticMinimaxH3Director.video_edit import (
+    apply_render_window,
     build_masks,
     checkerboard_preview,
     chroma_key,
@@ -444,3 +445,40 @@ def test_reframe_plate_free_position_align():
     rf.update({"align_x": 2.0, "align_y": 0.0})
     _, eff3, box3 = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
     assert box3[0] == 96 - 27, box3  # clamped: right edge
+
+
+def test_apply_render_window_crops_and_shifts_keys():
+    edit = parse_edit_data(json.dumps({
+        "mode": "inpaint",
+        "render_in": 1.0,
+        "render_out": 3.0,
+        "mask": {"type": "rect", "keys": [{"t": 0.5, "grid_w": 64, "grid_h": 64, "png": ""}, {"t": 2.5, "grid_w": 64, "grid_h": 64, "png": ""}]},
+        "reframe": {"track": [{"t": 1.5, "ax": 0.2, "ay": 0.8}]},
+    }))
+    i0, i1 = apply_render_window(edit, 24, 120)
+    # 1.0s..3.0s @ 24fps -> source frames 24..72
+    assert (i0, i1) == (24, 72)
+    # key times shift so they stay aligned after the crop (clip now starts at 1.0s)
+    assert [k["t"] for k in edit["mask"]["keys"]] == [0.0, 1.5]
+    assert edit["reframe"]["track"][0]["t"] == 0.5
+    # no window -> full range, keys untouched
+    edit2 = parse_edit_data(json.dumps({"mode": "inpaint", "mask": {"keys": [{"t": 0.5, "grid_w": 8, "grid_h": 8, "png": ""}]}}))
+    assert apply_render_window(edit2, 24, 120) == (0, 120)
+    assert edit2["mask"]["keys"][0]["t"] == 0.5
+    # empty window raises (when the parser hasn't already normalized it away)
+    with pytest.raises(ValueError):
+        apply_render_window({"render_in": 5.0, "render_out": 5.0}, 24, 120)
+    with pytest.raises(ValueError):
+        apply_render_window({"render_in": 6.0, "render_out": 3.0}, 24, 120)
+
+
+def test_parse_edit_data_render_window():
+    d = parse_edit_data(json.dumps({"mode": "inpaint", "render_in": 2.5, "render_out": 9.0}))
+    assert d["render_in"] == 2.5 and d["render_out"] == 9.0
+    # reversed window is dropped by the parser
+    d2 = parse_edit_data(json.dumps({"mode": "inpaint", "render_in": 9.0, "render_out": 2.5}))
+    assert d2["render_in"] is None and d2["render_out"] is None
+    # defaults survive old projects
+    d3 = parse_edit_data(json.dumps({"mode": "inpaint"}))
+    assert d3["render_in"] is None and d3["render_out"] is None
+    assert default_edit_dict()["render_in"] is None and default_edit_dict()["render_out"] is None

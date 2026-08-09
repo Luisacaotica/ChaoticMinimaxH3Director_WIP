@@ -356,3 +356,27 @@ def test_render_scene_two_layers_at_different_speeds():
     assert mid[32, 64, 0].item() > 0.6 and mid[32, 64, 2].item() < 0.4   # red sprite at cx=64
     assert mid[109, 40, 2].item() > 0.6 and mid[109, 40, 0].item() < 0.4  # blue sprite at cx=40
     assert mid[70, 10, 0].item() < 0.2                                     # empty corner stays bg
+
+
+def test_render_scene_render_window_slices_frames():
+    # the mockup editor's R-key render window: only [render_in, render_out] renders
+    layer = _solid_layer((200, 40, 40), size=24)
+    layer["id"] = "win"
+    scene = _color_scene([layer])
+    scene["render_in"] = 0.5
+    scene["render_out"] = 1.0
+    frames, warnings = render_scene(scene, 96, 96, fps=4, duration_sec=1.5)
+    # 1.5s @ 4fps = 6 frames; window 0.5..1.0 -> source frames 2..4 -> 2 frames
+    assert frames.shape == (1, 2, 96, 96, 3), frames.shape
+    assert len(warnings) == 0
+    # an empty window warns and falls back to the full clip
+    scene2 = _color_scene([layer])
+    scene2["render_in"] = 1.0
+    scene2["render_out"] = 0.5
+    frames2, warnings2 = render_scene(scene2, 96, 96, fps=4, duration_sec=1.0)
+    assert frames2.shape == (1, 4, 96, 96, 3)
+    assert any("empty" in w for w in warnings2)
+    # no window -> full clip, and the window round-trips through default dict
+    frames3, _ = render_scene(_color_scene([layer]), 96, 96, fps=4, duration_sec=1.0)
+    assert frames3.shape == (1, 4, 96, 96, 3)
+    assert default_scene_dict()["render_in"] is None and default_scene_dict()["render_out"] is None

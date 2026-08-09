@@ -85,6 +85,8 @@ def default_edit_dict() -> Dict[str, Any]:
         },
         "refs": [],            # copy-to-reference crops: [{"src": b64png, "at": sec}]
         "video_fps": None,     # the source file's real framerate (widget estimate)
+        "render_in": None,     # R-key render window IN (seconds), None = start
+        "render_out": None,    # R-key render window OUT (seconds), None = end
     }
 
 
@@ -205,7 +207,39 @@ def parse_edit_data(json_text: str) -> Dict[str, Any]:
     vfps = _as_float(data.get("video_fps"), 0.0)
     if 1.0 <= vfps <= 240.0:
         d["video_fps"] = vfps
+    rin = data.get("render_in")
+    rout = data.get("render_out")
+    if isinstance(rin, (int, float)) and not isinstance(rin, bool):
+        d["render_in"] = max(0.0, float(rin))
+    if isinstance(rout, (int, float)) and not isinstance(rout, bool):
+        d["render_out"] = max(0.0, float(rout))
+    if d["render_in"] is not None and d["render_out"] is not None and d["render_out"] <= d["render_in"]:
+        d["render_in"] = None
+        d["render_out"] = None
     return d
+
+
+def apply_render_window(edit: Dict[str, Any], fps: float, frame_count: int) -> Tuple[int, int]:
+    """Resolve the R-key render window [render_in, render_out] to source-frame
+    indices [i0, i1), and shift mask/reframe key times so they stay aligned
+    after the caller crops to the window.  Returns (i0, i1) with i1 >= i0.
+    Raises ValueError for an empty window.
+    """
+    rin = edit.get("render_in")
+    rout = edit.get("render_out")
+    if rin is None and rout is None:
+        return 0, int(frame_count)
+    fps = max(1.0, float(fps))
+    i0 = max(0, int(round(float(rin) * fps))) if rin is not None else 0
+    i1 = min(int(frame_count), int(round(float(rout) * fps))) if rout is not None else int(frame_count)
+    if i1 <= i0:
+        raise ValueError(f"render window [{rin}, {rout}] is empty at {fps:g} fps")
+    shift = i0 / fps
+    for key in edit.get("mask", {}).get("keys", []):
+        key["t"] = max(0.0, key["t"] - shift)
+    for key in edit.get("reframe", {}).get("track") or []:
+        key["t"] = max(0.0, key["t"] - shift)
+    return i0, i1
 
 
 # --------------------------------------------------------------------------- #

@@ -67,6 +67,8 @@ def _as_str(value: Any, default: str = "") -> str:
 def default_scene_dict() -> Dict[str, Any]:
     return {
         "version": SCENE_VERSION,
+        "render_in": None,   # render window IN (seconds), None = start
+        "render_out": None,  # render window OUT (seconds), None = end
         "aspect": "16:9",
         "bg": {"type": "color", "color": [16, 18, 22]},
         "layers": [],
@@ -557,6 +559,19 @@ def render_scene(
         rgb = canvas.convert("RGB")
         arr = np.asarray(rgb, dtype=np.float32) / 255.0
         frames.append(torch.from_numpy(arr))
+    # the mockup editor's R-key render window: only that span of the timeline
+    # is emitted, so the output video starts exactly at `render_in`.
+    rin = scene.get("render_in")
+    rout = scene.get("render_out")
+    if rin is not None or rout is not None:
+        i0 = max(0, int(round(float(rin) * fps))) if rin is not None else 0
+        i1 = min(len(frames), int(round(float(rout) * fps))) if rout is not None else len(frames)
+        if i1 <= i0:
+            warnings.append(
+                f"render window [{rin}, {rout}] is empty at {fps} fps — rendering the full clip"
+            )
+        else:
+            frames = frames[i0:i1]
     if not frames:
         frames.append(torch.zeros(height, width, 3))
     video = torch.stack(frames)  # [F, H, W, 3]

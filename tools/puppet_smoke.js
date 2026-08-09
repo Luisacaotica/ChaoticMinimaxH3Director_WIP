@@ -269,6 +269,44 @@ function check(name, cond, extra) {
   check("serialize round-trips keys", serialized.layers[0].keys.length === 2);
   check("serialize keeps bg + audio", serialized.bg.type === "color" && serialized.audio.file === "");
 
+  /* keyboard shortcuts: arrows nudge, S keys at playhead, R render window */
+  const keyEv = (key, shift) => ({ key, shiftKey: !!shift, target: {}, preventDefault() {} });
+  const hero0 = ed.layerById("layer_hero");
+  const hx0 = hero0.x != null ? hero0.x : 0.5;
+  const hy0 = hero0.y != null ? hero0.y : 0.5;
+  ed.selectedId = "layer_hero";
+  try { ed.onKeyDown(keyEv("ArrowRight")); } catch (e) { check("ArrowRight did not throw", false, e.message); }
+  check("ArrowRight nudges the layer 1 px on stage", hero0.x > hx0, "dx=" + (hero0.x - hx0).toFixed(5));
+  try { ed.onKeyDown(keyEv("ArrowUp", true)); } catch (e) { check("Shift+ArrowUp did not throw", false, e.message); }
+  check("Shift+ArrowUp nudges the layer 10 px up", hero0.y < hy0, "dy=" + (hero0.y - hy0).toFixed(5));
+  const kBefore = hero0.keys.length;
+  try { ed.setPlayhead(1.5); ed.onKeyDown(keyEv("s")); } catch (e) { check("S did not throw", false, e.message); }
+  check("S keys the selected layer at the playhead", hero0.keys.length === kBefore + 1 && hero0.keys.some(k => Math.abs(k.t - 1.5) < 0.02), "keys=" + hero0.keys.length);
+  /* keyframe position nudge: up/down moves y, never x */
+  const keyA = hero0.keys.find(k => Math.abs(k.t) < 0.02);
+  const kx0 = keyA.x, ky0 = keyA.y;
+  ed._selKeys.add("layer_hero@" + keyA.t);
+  try { ed.onKeyDown(keyEv("ArrowDown")); } catch (e) { check("keyframe ArrowDown did not throw", false, e.message); }
+  check("keyframe ArrowDown nudges y (not x)", keyA.y > ky0 && Math.abs(keyA.x - kx0) < 1e-9, "dy=" + (keyA.y - ky0).toFixed(5));
+  try { ed.onKeyDown(keyEv("ArrowUp", true)); } catch (e) { check("Shift+ArrowUp keyframe did not throw", false, e.message); }
+  check("Shift+ArrowUp keyframe nudges 10 px up", keyA.y < ky0, "dy=" + (keyA.y - ky0).toFixed(5));
+  ed._selKeys.clear();
+  /* cleanup: drop the key S added so later interpolation tests are untouched */
+  hero0.keys = hero0.keys.filter(k => Math.abs(k.t - 1.5) > 0.02);
+  ed.renderIn = null; ed.renderOut = null;
+  try { ed.setPlayhead(2); ed.onKeyDown(keyEv("r")); } catch (e) { check("R IN did not throw", false, e.message); }
+  check("R sets the render IN at the playhead", ed.renderIn === 2, "in=" + ed.renderIn);
+  try { ed.setPlayhead(4); ed.onKeyDown(keyEv("R")); } catch (e) { check("R OUT did not throw", false, e.message); }
+  check("second R sets the render OUT", ed.renderOut === 4, "out=" + ed.renderOut);
+  try { ed.onKeyDown(keyEv("r")); } catch (e) { check("third R did not throw", false, e.message); }
+  check("third R clears the render window", ed.renderIn === null && ed.renderOut === null, "in=" + ed.renderIn + " out=" + ed.renderOut);
+  ed.renderIn = 2; ed.renderOut = 4;
+  const winJson = JSON.parse(ed.serialize());
+  check("render window serializes", winJson.render_in === 2 && winJson.render_out === 4, "in=" + winJson.render_in + " out=" + winJson.render_out);
+  ed.renderIn = null; ed.renderOut = null;
+  try { ed.onKeyDown(Object.assign(keyEv("r"), { ctrlKey: true })); } catch (e) { check("ctrl+R ignored", false, e.message); }
+  check("ctrl+R is ignored (no hijack)", ed.renderIn === null && ed.renderOut === null);
+
   /* easing modes (module helpers + key strip + inspector dropdown) */
   const hero = ed.layerById("layer_hero");
   const p0 = hero.keys.find(k => Math.abs(k.t) < 0.02);

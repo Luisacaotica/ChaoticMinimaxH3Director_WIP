@@ -290,6 +290,34 @@ function check(name, cond, extra) {
   check("serialize keeps mask keys", serialized.mask.keys.length === 2);
   check("serialize keeps chroma", serialized.chroma.similarity === 0.4);
 
+  /* keyboard shortcuts: arrows nudge playhead, S keys at playhead, R render window */
+  const keyEv = (key, shift) => ({ key, shiftKey: !!shift, target: {}, preventDefault() {} });
+  ed.setPlayhead(2);
+  const ph0 = ed.playhead;
+  try { ed.onKeyDown(keyEv("ArrowRight")); } catch (e) { check("ArrowRight did not throw", false, e.message); }
+  const ph1 = ed.playhead;
+  check("ArrowRight nudges the playhead 1 frame", Math.abs((ph1 - ph0) - 1 / 24) < 1e-6, "delta=" + (ph1 - ph0));
+  try { ed.onKeyDown(keyEv("ArrowLeft", true)); } catch (e) { check("Shift+ArrowLeft did not throw", false, e.message); }
+  const ph2 = ed.playhead;
+  check("Shift+ArrowLeft nudges back 10 frames", Math.abs((ph2 - ph1) + 10 / 24) < 1e-9, "delta=" + (ph2 - ph1));
+  const k0 = ed.state.mask.keys.length;
+  try { ed.setPlayhead(3.2); ed.onKeyDown(keyEv("s")); } catch (e) { check("S did not throw", false, e.message); }
+  check("S sets a mask key at the playhead", ed.state.mask.keys.length === k0 + 1 && ed.keyAt(ed.playhead) != null, "keys=" + ed.state.mask.keys.length);
+  try { ed.onKeyDown(keyEv("Delete")); } catch (e) { check("Delete did not throw", false, e.message); }
+  check("Delete removes the mask key at the playhead", ed.state.mask.keys.length === k0, "keys=" + ed.state.mask.keys.length);
+  ed.state.render_in = null; ed.state.render_out = null;
+  try { ed.setPlayhead(1); ed.onKeyDown(keyEv("r")); } catch (e) { check("R IN did not throw", false, e.message); }
+  check("R sets the render IN at the playhead", ed.state.render_in === 1, "in=" + ed.state.render_in);
+  try { ed.setPlayhead(2.5); ed.onKeyDown(keyEv("R")); } catch (e) { check("R OUT did not throw", false, e.message); }
+  check("second R sets the render OUT", ed.state.render_out === 2.5, "out=" + ed.state.render_out);
+  try { ed.onKeyDown(keyEv("r")); } catch (e) { check("third R did not throw", false, e.message); }
+  check("third R clears the render window", ed.state.render_in === null && ed.state.render_out === null, "in=" + ed.state.render_in + " out=" + ed.state.render_out);
+  ed.state.render_in = 1; ed.state.render_out = 2.5;
+  check("render window serializes", JSON.parse(ed.serialize()).render_in === 1 && JSON.parse(ed.serialize()).render_out === 2.5);
+  ed.state.render_in = null; ed.state.render_out = null;
+  try { ed.onKeyDown(Object.assign(keyEv("r"), { ctrlKey: true })); } catch (e) { check("ctrl+R ignored", false, e.message); }
+  check("ctrl+R is ignored (no hijack)", ed.state.render_in === null && ed.state.render_out === null);
+
   /* sample color guard without video */
   let sampleThrew = null;
   try { ed.sampleColor(); } catch (e) { sampleThrew = e; }

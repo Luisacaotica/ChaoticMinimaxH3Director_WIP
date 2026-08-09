@@ -594,7 +594,11 @@ class ChaoticDirectorEditor {
     this.canvas.addEventListener("keydown", e => this.onKeyDown(e));
     this.canvas.tabIndex = 0;
     if (typeof document.addEventListener === "function") {
-      document.addEventListener("keydown", e => this.onKeyDown(e));
+      /* only act when THIS editor is focused — keeps per-node keydown from
+         firing while another Chaotic node (or a ComfyUI widget) has focus */
+      document.addEventListener("keydown", e => {
+        if (this.wrapper && this.wrapper.contains(e.target)) this.onKeyDown(e);
+      });
       /* the canvas can't see a mouseup released over the library panel —
          listen at document level for the drag-to-library check */
       document.addEventListener("mouseup", e => this.onMouseUp(e));

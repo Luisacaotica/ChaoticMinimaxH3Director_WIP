@@ -296,6 +296,7 @@ class ChaoticVideoEdit {
     this.state = {
       version: 1, mode: "inpaint", edit: "inside", plate_color: "black",
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
+      render_in: null, render_out: null,
       mask: { type: "rect", keys: [] },
       chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
       reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0, fit: "contain", track: [] },
@@ -344,6 +345,7 @@ class ChaoticVideoEdit {
   defaultEdit() {
     return JSON.parse(JSON.stringify({ version: 1, mode: "inpaint", edit: "inside", plate_color: "black",
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
+      render_in: null, render_out: null,
       mask: { type: "rect", keys: [] },
       chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
       reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0, fit: "contain", track: [] },
@@ -370,6 +372,8 @@ class ChaoticVideoEdit {
       outpaint: !!raw.outpaint,
       prompt: typeof raw.prompt === "string" ? raw.prompt : "",
       video_file: typeof raw.video_file === "string" ? raw.video_file : "",
+      render_in: raw.render_in == null ? null : veClamp(Number(raw.render_in) || 0, 0, 86400),
+      render_out: raw.render_out == null ? null : veClamp(Number(raw.render_out) || 0, 0, 86400),
       mask: { type: raw.mask && raw.mask.type === "brush" ? "brush" : "rect", keys: [] },
       chroma: {
         color: Array.isArray(raw.chroma && raw.chroma.color) && raw.chroma.color.length >= 3
@@ -381,6 +385,10 @@ class ChaoticVideoEdit {
         auto: !!(raw.chroma && raw.chroma.auto),
       },
     };
+    if (this.state.render_in != null && this.state.render_out != null && this.state.render_out <= this.state.render_in) {
+      this.state.render_in = null;
+      this.state.render_out = null;
+    }
     const rawRf = raw.reframe || {};
     this.state.reframe = {
       target_w: Math.max(16, Math.min(4096, parseInt(rawRf.target_w, 10) || 1280)),
@@ -945,6 +953,15 @@ class ChaoticVideoEdit {
 
     /* interactions */
     this.canvas.addEventListener("mousedown", e => this.onCanvasDown(e));
+    this.canvas.tabIndex = 0;
+    this.canvas.addEventListener("keydown", e => this.onKeyDown(e));
+    if (typeof document.addEventListener === "function") {
+      /* only act when THIS editor is focused — keeps per-node keydown from
+         firing while another Chaotic node (or a ComfyUI widget) has focus */
+      document.addEventListener("keydown", e => {
+        if (this.wrapper && this.wrapper.contains(e.target)) this.onKeyDown(e);
+      });
+    }
     this.canvas.addEventListener("mousemove", e => this.onCanvasMove(e));
     this.canvas.addEventListener("dblclick", e => this.onCanvasDbl(e));
     this.canvas.addEventListener("contextmenu", e => {
@@ -1802,6 +1819,61 @@ class ChaoticVideoEdit {
   }
 
   /* ---------------- key strip ---------------- */
+  /* timeline keyboard shortcuts: ← → nudge the playhead by 1 frame (Shift = 10),
+     S sets a mask key at the playhead (the cut), R toggles the render window,
+     Del removes the mask key at the playhead, Esc clears the painted mask */
+  onKeyDown(e) {
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || (t.isContentEditable))) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const mult = e.shiftKey ? 10 : 1;
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      e.preventDefault();
+      const unit = 1 / (this.fpsWidgetValue() || 24);
+      this.setPlayhead(this.playhead + (e.key === "ArrowRight" ? 1 : -1) * unit * mult);
+      this.updateStatus("Playhead at " + veFmt(this.playhead) + " — arrows nudge 1 frame (Shift = 10).");
+    } else if (e.key === "s" || e.key === "S") {
+      e.preventDefault();
+      if (this._workMask) {
+        this.setMaskKey();
+        this.updateStatus("Mask key set at " + veFmt(this.playhead) + " — S cuts at the playhead (masks cross-fade).");
+      } else {
+        this.updateStatus("Paint a mask first (Brush/Rect), then press S to set the key at the playhead.");
+      }
+    } else if (e.key === "r" || e.key === "R") {
+      e.preventDefault();
+      const at = Math.round(this.playhead * 1000) / 1000;
+      if (this.state.render_in == null) {
+        this.state.render_in = at;
+        this.state.render_out = null;
+        this.updateStatus("Render IN set at " + veFmt(at) + " — move the playhead to the OUT point and press R (R before the IN point clears).");
+      } else if (this.state.render_out == null || this.state.render_out <= this.state.render_in) {
+        if (at <= this.state.render_in) {
+          this.state.render_in = null;
+          this.state.render_out = null;
+          this.updateStatus("Render range cleared.");
+        } else {
+          this.state.render_out = at;
+          this.updateStatus("Render range " + veFmt(this.state.render_in) + " → " + veFmt(this.state.render_out) + " — only that window is rendered.");
+        }
+      } else {
+        this.state.render_in = null;
+        this.state.render_out = null;
+        this.updateStatus("Render range cleared.");
+      }
+      this.commitChanges();
+    } else if (e.key === "Delete" || e.key === "Backspace") {
+      e.preventDefault();
+      this.delMaskKey();
+    } else if (e.key === "Escape") {
+      if (this._workMask) {
+        this._workMask = null;
+        this.drawPreview();
+        this.updateStatus("Painted mask cleared.");
+      }
+    }
+  }
+
   drawKeyStrip() {
     if (!this.keyCanvas || !this.keyCtx) return;
     const ctx = this.keyCtx;
@@ -1811,6 +1883,14 @@ class ChaoticVideoEdit {
     ctx.fillStyle = "#181818";
     ctx.fillRect(0, 0, w, h);
     const dur = Math.max(0.1, this.durationSec);
+    /* render window (R key): shade everything outside [render_in, render_out) */
+    if (this.state.render_in != null || this.state.render_out != null) {
+      const xIn = this.state.render_in != null ? (this.state.render_in / dur) * w : 0;
+      const xOut = this.state.render_out != null ? (this.state.render_out / dur) * w : w;
+      ctx.fillStyle = "rgba(0,0,0,.45)";
+      if (xIn > 0) ctx.fillRect(0, 0, xIn, h);
+      if (xOut < w) ctx.fillRect(xOut, 0, w - xOut, h);
+    }
     this.state.mask.keys.forEach(k => {
       const x = (k.t / dur) * w;
       ctx.fillStyle = "#ff5a5a";

@@ -164,6 +164,8 @@ class ChaoticPuppetEditor {
     this.playhead = 0;
     this.playing = false;
     this.selectedId = null;
+    this.renderIn = null;        // render window IN (seconds), null = start
+    this.renderOut = null;       // render window OUT (seconds), null = end
     this.snapOn = false;
     this._selKeys = new Set();   // "layerId@t" — multi-select keyframes
     this._drag = null;
@@ -236,6 +238,12 @@ class ChaoticPuppetEditor {
         : { file: "", trim_start: 0, trim_end: null },
       lib: Array.isArray(raw.lib) ? raw.lib.filter(x => x && x.file) : [],
     };
+    this.renderIn = raw.render_in == null ? null : Number(raw.render_in);
+    this.renderOut = raw.render_out == null ? null : Number(raw.render_out);
+    if (this.renderIn != null && this.renderOut != null && this.renderOut <= this.renderIn) {
+      this.renderIn = null;
+      this.renderOut = null;
+    }
     /* Only a project file that actually DECLARES a preset aspect restores the
        preset's render size. A plain node load — or an old project saved before
        this feature (no `aspect` field) — leaves the width/height widgets alone,
@@ -294,6 +302,8 @@ class ChaoticPuppetEditor {
   serialize() {
     return JSON.stringify({
       version: 1,
+      render_in: this.renderIn,
+      render_out: this.renderOut,
       aspect: this.stateAspectLabel(),
       bg: this.state.bg,
       layers: this.state.layers.map(l => ({
@@ -675,7 +685,11 @@ class ChaoticPuppetEditor {
     this.canvas.addEventListener("keydown", e => this.onKeyDown(e));
     this.canvas.tabIndex = 0;
     if (typeof document.addEventListener === "function") {
-      document.addEventListener("keydown", e => this.onKeyDown(e));
+      /* only act when THIS editor is focused — keeps per-node keydown from
+         firing while another Chaotic node (or a ComfyUI widget) has focus */
+      document.addEventListener("keydown", e => {
+        if (this.wrapper && this.wrapper.contains(e.target)) this.onKeyDown(e);
+      });
     }
     this.keyCanvas.addEventListener("mousedown", e => this.onKeyStripDown(e));
     this.wrapper.addEventListener("dragover", e => { e.preventDefault(); e.stopPropagation(); });
@@ -1111,6 +1125,15 @@ class ChaoticPuppetEditor {
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = "#181818";
     ctx.fillRect(0, 0, w, h);
+    /* render window: shade everything outside [renderIn, renderOut) */
+    if (this.renderIn != null || this.renderOut != null) {
+      const track = Math.max(1, w - KEYSTRIP_GUTTER);
+      const xIn = this.renderIn != null ? this.stripX(this.renderIn, w) : 0;
+      const xOut = this.renderOut != null ? this.stripX(this.renderOut, w) : w;
+      ctx.fillStyle = "rgba(0,0,0,.45)";
+      if (xIn > 0) ctx.fillRect(0, 0, xIn, h);
+      if (xOut < w) ctx.fillRect(xOut, 0, w - xOut, h);
+    }
     const sel = this.selectedId ? this.layerById(this.selectedId) : null;
     /* ruler row (project seconds) */
     ctx.fillStyle = "#141414";
@@ -1548,7 +1571,41 @@ class ChaoticPuppetEditor {
   onKeyDown(e) {
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || (t.isContentEditable))) return;
-    if (e.key === "Delete" || e.key === "Backspace") {
+    /* never hijack browser/OS chords (Ctrl+R reload, Ctrl+S, Ctrl/Alt+arrows) */
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    const mult = e.shiftKey ? 10 : 1;
+    if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "ArrowUp" || e.key === "ArrowDown") {
+      /* nudge selected keyframes (time or position) — or the layer, 1 px */
+      e.preventDefault();
+      this.nudgeSelection(e.key, mult);
+    } else if (e.key === "s" || e.key === "S") {
+      /* split/cut at the playhead = keyframe the selected layer there */
+      e.preventDefault();
+      this.addKeyAtPlayhead();
+    } else if (e.key === "r" || e.key === "R") {
+      /* render window: R sets IN, R again sets OUT, R again clears */
+      e.preventDefault();
+      const at = Math.round(this.playhead * 1000) / 1000;
+      if (this.renderIn == null) {
+        this.renderIn = at;
+        this.renderOut = null;
+        this.updateStatus("Render IN set at " + fmtTimestamp(at) + " — move the playhead to the OUT point and press R (R before the IN point clears).");
+      } else if (this.renderOut == null || this.renderOut <= this.renderIn) {
+        if (at <= this.renderIn) {
+          this.renderIn = null;
+          this.renderOut = null;
+          this.updateStatus("Render range cleared.");
+        } else {
+          this.renderOut = at;
+          this.updateStatus("Render range " + fmtTimestamp(this.renderIn) + " → " + fmtTimestamp(this.renderOut) + " — only that window renders.");
+        }
+      } else {
+        this.renderIn = null;
+        this.renderOut = null;
+        this.updateStatus("Render range cleared.");
+      }
+      this.commitChanges();
+    } else if (e.key === "Delete" || e.key === "Backspace") {
       if (this._selKeys && this._selKeys.size) {
         e.preventDefault();
         this._selKeys.forEach(k => {
@@ -1577,6 +1634,48 @@ class ChaoticPuppetEditor {
       this.drawKeyStrip();
       this.drawStage();
     }
+  }
+
+  /* nudge selected keyframes (time with ← →, position with ↑ ↓) or the layer
+     (1 px on the stage; Shift = 10x; key times land on the frame grid) */
+  nudgeSelection(dir, mult) {
+    const unit = 1 / (this.fps || 24);
+    const [W, H] = this.stageSize();
+    const pxX = 1 / Math.max(1, W);
+    const pxY = 1 / Math.max(1, H);
+    const horiz = dir === "ArrowLeft" || dir === "ArrowRight";
+    const sign = (dir === "ArrowRight" || dir === "ArrowDown") ? 1 : -1;
+    if (this._selKeys && this._selKeys.size) {
+      const next = new Set();
+      this._selKeys.forEach(sig => {
+        const [lid, t0] = String(sig).split("@");
+        const layer = this.layerById(lid);
+        if (!layer) return;
+        const key = (layer.keys || []).find(kk => Math.abs(kk.t - Number(t0)) < 1e-6);
+        if (!key) return;
+        if (horiz) {
+          key.t = Math.round(clamp(key.t + sign * unit * mult, 0, this.durationSec) * 1000) / 1000;
+        } else {
+          key.y = this.snapVal(clamp((key.y != null ? key.y : 0.5) + sign * pxY * mult, 0, 1), 0.01);
+        }
+        next.add(layer.id + "@" + key.t);
+      });
+      this._selKeys = next;
+      this.commitChanges();
+      this.buildInspector();
+      this.updateStatus(this._selKeys.size + " keyframe(s) nudged — Del removes, Shift+click to multi-select.");
+      return;
+    }
+    const layer = this.selectedId ? this.layerById(this.selectedId) : null;
+    if (!layer) {
+      this.updateStatus("Select a layer or keyframe first, then use the arrow keys.");
+      return;
+    }
+    if (horiz) layer.x = this.snapVal(clamp(layer.x + sign * pxX * mult, 0, 1), 0.01);
+    else layer.y = this.snapVal(clamp(layer.y + sign * pxY * mult, 0, 1), 0.01);
+    this.commitChanges();
+    this.buildInspector();
+    this.updateStatus("Layer moved — arrows nudge 1 px (Shift = 10 px).");
   }
 
   /* ---------------- playback ---------------- */

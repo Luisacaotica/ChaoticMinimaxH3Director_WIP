@@ -34,6 +34,7 @@ from .radio_play import DEFAULT_RADIO_SCRIPT, plan_radio_play
 from .stitching import as_video_batch, stitch_chunks
 from .video_edit import (
     VOID_COLORS,
+    apply_render_window,
     build_masks,
     checkerboard_preview,
     chroma_key,
@@ -443,6 +444,13 @@ class ChaoticH3VideoEdit:
                 "Chaotic H3 Video Edit: wire a `video` input or load a file in the widget first."
             )
         F, H, W = vid.shape[0], vid.shape[1], vid.shape[2]
+        # R-key render window: crop the source to [render_in, render_out] and
+        # shift mask/reframe key times so they still line up with the crop.
+        if edit.get("render_in") is not None or edit.get("render_out") is not None:
+            i0, i1 = apply_render_window(edit, fps, F)
+            vid = vid[i0:i1]
+            F = vid.shape[0]
+            _log(f"render window applied: {i0 / fps:g}s -> {i1 / fps:g}s ({F} frames)")
         vfps = edit.get("video_fps")
         if vfps and abs(float(vfps) - fps) > 1.0:
             _log(
