@@ -356,7 +356,9 @@ def _load_bg(scene: Dict[str, Any], width: int, height: int, cache: _SpriteCache
 
 def _fit_sprite(sprite, width: int, height: int, scale: float, pad_color):
     """Contain-fit the sprite to the stage, multiplied by `scale`, on a pad of
-    `pad_color` so the layer still covers the full stage (matches JS preview)."""
+    `pad_color` so the layer still covers the full stage (matches JS preview).
+
+    Returns (canvas, tw, th) — the fitted size is needed for pivot math."""
     from PIL import Image  # noqa: PLC0415
 
     sw, sh = sprite.size
@@ -365,7 +367,70 @@ def _fit_sprite(sprite, width: int, height: int, scale: float, pad_color):
     resized = sprite.resize((tw, th), _resample(sprite))
     canvas = Image.new("RGBA", (width, height), pad_color)
     canvas.alpha_composite(resized, ((width - tw) // 2, (height - th) // 2))
-    return canvas
+    return canvas, tw, th
+
+
+def _layer_pivot(layer: Dict[str, Any]) -> Tuple[float, float]:
+    """The layer's pin point as fractions (0..1) of the sprite; default center."""
+    pv = layer.get("pivot") if isinstance(layer.get("pivot"), dict) else {}
+    try:
+        px = min(1.0, max(0.0, float(pv.get("x", 0.5))))
+        py = min(1.0, max(0.0, float(pv.get("y", 0.5))))
+    except (TypeError, ValueError):
+        px = py = 0.5
+    return px, py
+
+
+def _place_fitted(fitted, tw: int, th: int, props, layer):
+    """Pivot-aware placement of a full-stage fitted sprite.
+
+    Returns (canvas, ax, ay): the caller pastes so the anchor lands on the
+    layer's (x, y) point.  The pivot is moved to the anchor, so the sprite
+    rotates/scales around the pin point.  A default pivot of (0.5, 0.5)
+    reproduces the previous center-anchored behavior exactly.
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    width, height = fitted.size
+    px, py = _layer_pivot(layer)
+    rot = float(props.get("rotation") or 0.0)
+    if abs(rot) <= 0.5 and px == 0.5 and py == 0.5:
+        return fitted, width // 2, height // 2
+    pivot_sx = (width - tw) / 2 + px * tw
+    pivot_sy = (height - th) / 2 + py * th
+    out = Image.new("RGBA", (width, height), (0, 0, 0, 0))
+    if abs(rot) > 0.5:
+        pad = int(math.ceil(math.hypot(width, height))) + 2
+        big = Image.new("RGBA", (pad, pad), (0, 0, 0, 0))
+        big.alpha_composite(fitted, (int(round(pad / 2 - pivot_sx)), int(round(pad / 2 - pivot_sy))))
+        big = big.rotate(rot, resample=Image.BILINEAR, center=(pad / 2, pad / 2))
+        out.alpha_composite(big, (int(round(width / 2 - pad / 2)), int(round(height / 2 - pad / 2))))
+    else:
+        dx = int(round((0.5 - px) * tw))
+        dy = int(round((0.5 - py) * th))
+        out.alpha_composite(fitted, (dx, dy))
+    return out, width // 2, height // 2
+
+
+def _pivot_sprite(sprite, rot, px: float, py: float):
+    """Pivot-aware rotate for raw (non-stage) sprites — text layers.
+
+    Returns (sprite, ax, ay): the caller pastes so the anchor lands on (x, y);
+    the pivot IS the anchor, so rotation happens around the pin point.
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    sw, sh = sprite.size
+    rot = float(rot or 0.0)
+    if abs(rot) <= 0.5 and px == 0.5 and py == 0.5:
+        return sprite, sw // 2, sh // 2
+    pivot_x = px * sw
+    pivot_y = py * sh
+    pad = int(math.ceil(math.hypot(sw, sh))) + 2
+    big = Image.new("RGBA", (pad, pad), (0, 0, 0, 0))
+    big.alpha_composite(sprite, (int(round(pad / 2 - pivot_x)), int(round(pad / 2 - pivot_y))))
+    big = big.rotate(rot, resample=Image.BILINEAR, center=(pad / 2, pad / 2))
+    return big, pad // 2, pad // 2
 
 
 def _resample(image) -> int:
@@ -396,25 +461,26 @@ def _render_layer_sprite(
     from PIL import Image  # noqa: PLC0415
 
     try:
+        pvx, pvy = _layer_pivot(layer)
         if layer["type"] == "image":
             sprite = cache.image(layer["file"]).copy()
-            fitted = _fit_sprite(sprite, width, height, props["scale"], (0, 0, 0, 0))
+            fitted, fw, fh = _fit_sprite(sprite, width, height, props["scale"], (0, 0, 0, 0))
+            out, ax, ay = _place_fitted(fitted, fw, fh, props, layer)
         elif layer["type"] == "text":
-            px = max(8, layer["font_size"] * width)
-            sprite = _text_sprite(layer["text"], layer["color"], px, text_cache).copy()
+            tpx = max(8, layer["font_size"] * width)
+            sprite = _text_sprite(layer["text"], layer["color"], tpx, text_cache).copy()
             s = max(0.01, props["scale"])
             tw = max(1, int(sprite.size[0] * s))
             th = max(1, int(sprite.size[1] * s))
             fitted = sprite.resize((tw, th), Image.BILINEAR)
+            out, ax, ay = _pivot_sprite(fitted, props["rotation"], pvx, pvy)
         else:  # pragma: no cover
             return None
 
-        if abs(props["rotation"]) > 0.5:
-            fitted = fitted.rotate(props["rotation"], resample=Image.BILINEAR, expand=True)
         opacity = min(1.0, max(0.0, props["opacity"]))
         if opacity < 1.0:
-            fitted.putalpha(fitted.getchannel("A").point(lambda a: int(a * opacity)))
-        return fitted
+            out.putalpha(out.getchannel("A").point(lambda a: int(a * opacity)))
+        return out, ax, ay
     except FileNotFoundError:
         warnings.append(f"Mockup: asset not found — skipped {layer.get('file')}")
         return None
@@ -471,24 +537,23 @@ def render_scene(
                     continue
                 if sprite is None:
                     continue
-                fitted = _fit_sprite(sprite, width, height, props["scale"], (0, 0, 0, 0))
-                if abs(props["rotation"]) > 0.5:
-                    fitted = fitted.rotate(props["rotation"], resample=_resample(fitted), expand=True)
+                fitted, fw, fh = _fit_sprite(sprite, width, height, props["scale"], (0, 0, 0, 0))
                 opacity = min(1.0, max(0.0, props["opacity"]))
                 if opacity < 1.0:
                     fitted.putalpha(fitted.getchannel("A").point(lambda a: int(a * opacity)))
-                sprite_out = fitted
+                sprite_out, ax, ay = _place_fitted(fitted, fw, fh, props, layer)
             else:
-                sprite_out = _render_layer_sprite(
+                placed = _render_layer_sprite(
                     layer, props, width, height, cache, text_cache, warnings
                 )
-                if sprite_out is None:
+                if placed is None:
                     continue
-            # center placement in normalized coordinates
+                sprite_out, ax, ay = placed
+            # pivot-aware placement: the layer's anchor (x, y) lands on its pin
+            # point; the default pivot (0.5, 0.5) keeps the old centered behavior
             cx = int(round(props["x"] * width))
             cy = int(round(props["y"] * height))
-            w2, h2 = sprite_out.size[0] // 2, sprite_out.size[1] // 2
-            canvas.alpha_composite(sprite_out, (cx - w2, cy - h2))
+            canvas.alpha_composite(sprite_out, (cx - ax, cy - ay))
         rgb = canvas.convert("RGB")
         arr = np.asarray(rgb, dtype=np.float32) / 255.0
         frames.append(torch.from_numpy(arr))

@@ -294,6 +294,42 @@ def test_props_at_speed_warps_motion():
     assert props_at(_speed_layer(1.0), 1.0)["x"] == pytest.approx(0.5)
 
 
+def test_layer_pivot_defaults_and_parsing():
+    from ChaoticMinimaxH3Director.mockup import _layer_pivot
+
+    assert _layer_pivot({}) == (0.5, 0.5)
+    assert _layer_pivot({"pivot": {"x": 0.1, "y": 0.9}}) == (0.1, 0.9)
+    assert _layer_pivot({"pivot": {"x": -5, "y": 9}}) == (0.0, 1.0)      # clamped
+    assert _layer_pivot({"pivot": {"x": "bogus"}}) == (0.5, 0.5)         # sanitized
+
+
+def test_pivot_places_sprite_at_the_pin_point():
+    """A corner pivot (0,0) must anchor the sprite's top-left at the layer's
+    (x, y) — the pin point — not the center (WYSIWYG with the JS gizmo)."""
+    layer = _solid_layer((255, 0, 0), size=32)
+    layer.update({"x": 0.5, "y": 0.5, "scale": 0.5, "rotation": 0, "pivot": {"x": 0.0, "y": 0.0}})
+    scene = _color_scene([layer], bg=(0, 0, 0))
+    frames, warnings = render_scene(scene, 64, 64, fps=1, duration_sec=0.5)
+    assert len(warnings) == 0
+    mid = frames[0, 0]
+    # fitted size: 32x32 sprite contain-fit 64x64 at scale 0.5 -> 32x32;
+    # with a top-left pivot the sprite lands in the bottom-right quadrant
+    assert mid[32, 32, 0].item() > 0.9       # pin point = stage center -> red
+    assert mid[16, 16, 0].item() < 0.1       # top-left stays background
+    assert mid[40, 40, 0].item() > 0.9       # inside the sprite
+
+
+def test_pivot_rotation_renders_without_clipping_errors():
+    """Rotation about a corner pivot (the sword-swing case) must render and
+    keep the pin fixed even when the rotated sprite overflows its bbox."""
+    layer = _solid_layer((0, 200, 0), size=24)
+    layer.update({"x": 0.5, "y": 0.5, "scale": 0.5, "rotation": 90, "pivot": {"x": 0.0, "y": 0.5}})
+    scene = _color_scene([layer], bg=(0, 0, 0))
+    frames, warnings = render_scene(scene, 64, 64, fps=1, duration_sec=0.5)
+    assert frames.shape == (1, 1, 64, 64, 3)
+    assert len(warnings) == 0
+
+
 def test_render_scene_two_layers_at_different_speeds():
     # two solid sprites drifting right at different speeds; non-overlapping rows
     fast = _solid_layer((200, 40, 40), size=32)   # red, y=0.25 (top)

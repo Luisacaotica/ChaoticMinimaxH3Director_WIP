@@ -217,6 +217,39 @@ Widget edits serialize straight back into the node's `timeline_data` string, so 
 
 ---
 
+## 🛠️ Editor QoL & fixes (this batch)
+
+Everything below is baked into the three editors — no new sockets, same save files (old projects load as-is).
+
+**Director timeline:**
+- **Right-click context menus** — on a shot: *Split at playhead* (moves the playhead if needed), *Duplicate*, *Delete*. On a reference: *Preview*, *Move to library / Place on timeline*, *Role* toggle, *Delete*. On empty track space: *Import Picture/Video/Audio* and *Grab from library* (places the library ref at that exact time).
+- **Delete key** removes the selected shot or reference (ignored while typing). **Esc** clears the selection.
+- **Snap + frame/second mode** — a settings toolbar above the timeline: 🧲 Snap (frame grid at the node's fps, or whole seconds), ⛔ Overlap lock (shots can no longer slide over each other — the drag is blocked to the nearest free gap, and double-clicking an existing shot opens it instead of stacking a new one on top).
+- **Drag back to the library** — grab a timeline reference and drop it on the open Reference library panel; it flips to library placement.
+- **Bigger scrub preview with audio** — the preview stage is taller, video previews are **unmuted** (🔊 toggle), audio refs actually scrub (the hidden `<audio>` element is live), and ▶ Preview in the inspector now *plays* library videos/audios and shows pictures (it used to do nothing for stills).
+- **Tag autosuggest** — start typing `<` in a shot's prompt and a dropdown of your real `<Picture N>/<Video N>/<Audio N>`/`S#` tags appears (click to insert); there's also an **Insert:** chip row with every available tag, one click from the caret. The "No reference tags" message now tells you exactly which tags you *can* type instead of just complaining.
+- **Role feedback** — switching a video to *Clip being edited* shows an orange **EDIT** badge on its timeline block, and the inspector explains what each role means (hover the toggle).
+- **Collapsible inspector** — the parameters panel now collapses like the library (connections are untouched — it's just a DOM panel), and its rows are packed into a two-column grid.
+- **Fix: `NaN weak_reference`** — references saved without a strength no longer deserialize to `NaN` (they default to 1.0).
+- **Fix: library sliders no longer start a card drag** — dragging the strength slider used to trigger "move mode" because the card was HTML5-draggable.
+- **Wider trim handles** (7 px hit zone) — resizing a shot no longer accidentally moves it; handles are drawn thicker too.
+
+**Video Edit node:**
+- **Double-click** the preview to load a video (with one loaded, double-click plays/pauses).
+- **Audible preview** — the source video element is now live (unmuted, 🔊 toggle): scrub and play with sound instead of a silent mute.
+- **No more black bars** — the letterbox area is a subtle checkerboard "stage" instead of dead black, and the Reframe outpaint region is a lighter, hatched dim so the source video stays visible.
+- **Green-screen guide** — the chroma panel explains the three-step workflow (Sample/Detect → tune Similarity/Smooth → the checkerboard *is* transparency), and the key preview is crisper (8 px cells).
+
+**Mockup Editor:**
+- **Photoshop-style gizmo** — select a layer and you get 8 scale handles, a ⭘ rotate knob above the top edge, and a **pivot pin** (the small dot): drag it to re-pin the layer so rotation/scale happen around, say, a sword hilt. The pin needs **Alt** to grab so plain clicks still move the layer. The pin point is mirrored in the Python renderer (`mockup.py`) — WYSIWYG.
+- **Snap** toggle in the toolbar — layer drags, rotation (5° steps) and key times land on the grid.
+- **Delete** removes selected keyframes (Shift-click to multi-select on the key strip, they get a bright ring) or the layer itself.
+- **Background timeline** — a new Background panel: set a color or image, press **● Key BG at playhead**, and the background animates like any layer (keys are listed, click to jump, ✕ to remove).
+- **Sprite library** — every imported image/video lands in the 🧰 Library panel; drag a card back onto the stage to re-add it as a layer at that spot.
+- **Fix: recording flicker** — recorded rotation now tracks the pointer's *angle delta* around the layer center (it used to spin to face the cursor, flickering and making subjects vanish); scale range is also capped tighter.
+
+---
+
 ## 🧠 How chunking & VRAM safety work (the whole point)
 
 - **Chunk duration**: fixed seconds, or **auto** — probes free VRAM (`torch.cuda.mem_get_info()`), learns from this session's successful runs, and picks the largest chunk that has *actually* fit (grown at most 1.5× between runs).

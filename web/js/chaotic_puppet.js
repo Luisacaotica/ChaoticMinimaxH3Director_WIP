@@ -160,10 +160,12 @@ class ChaoticPuppetEditor {
     this.container = container;
     this.domWidget = domWidget;
 
-    this.state = { bg: { type: "color", color: [16, 18, 22] }, layers: [], audio: { file: "", trim_start: 0, trim_end: null } };
+    this.state = { bg: { type: "color", color: [16, 18, 22] }, layers: [], lib: [], audio: { file: "", trim_start: 0, trim_end: null } };
     this.playhead = 0;
     this.playing = false;
     this.selectedId = null;
+    this.snapOn = false;
+    this._selKeys = new Set();   // "layerId@t" — multi-select keyframes
     this._drag = null;
     this._lastWidth = 0;
     this._lastScale = 0;
@@ -183,6 +185,7 @@ class ChaoticPuppetEditor {
     this._recStartPlayhead = 0;
     this._recLastSample = 0;
     this._recStartY = 0;
+    this._recStartX = 0;
     this._recBaseCenter = null;
     this._recBaseScale = 1;
 
@@ -231,6 +234,7 @@ class ChaoticPuppetEditor {
       audio: (raw.audio && typeof raw.audio === "object")
         ? { file: raw.audio.file || "", trim_start: Number(raw.audio.trim_start) || 0, trim_end: raw.audio.trim_end == null ? null : Number(raw.audio.trim_end) }
         : { file: "", trim_start: 0, trim_end: null },
+      lib: Array.isArray(raw.lib) ? raw.lib.filter(x => x && x.file) : [],
     };
     /* Only a project file that actually DECLARES a preset aspect restores the
        preset's render size. A plain node load — or an old project saved before
@@ -268,6 +272,9 @@ class ChaoticPuppetEditor {
       font_size: Math.max(0.01, Number(l.font_size) || 0.06),
       trim_start: Math.max(0, Number(l.trim_start) || 0),
       speed: isFinite(Number(l.speed)) ? clamp(Number(l.speed), 0.05, 4) : 1,
+      pivot: (l.pivot && typeof l.pivot === "object")
+        ? { x: clamp(Number(l.pivot.x) != null ? Number(l.pivot.x) : 0.5, 0, 1), y: clamp(Number(l.pivot.y) != null ? Number(l.pivot.y) : 0.5, 0, 1) }
+        : { x: 0.5, y: 0.5 },
       keys: Array.isArray(l.keys)
         ? l.keys.map(k => ({
             t: Math.max(0, Number(k.t) || 0),
@@ -294,8 +301,10 @@ class ChaoticPuppetEditor {
         x: l.x, y: l.y, scale: l.scale, rotation: l.rotation, opacity: l.opacity,
         text: l.text, color: l.color, font_size: l.font_size, trim_start: l.trim_start,
         speed: l.speed || 1,
+        pivot: l.pivot || { x: 0.5, y: 0.5 },
         keys: l.keys.map(k => ({ t: k.t, ease: normalizeEase(k.ease), x: k.x, y: k.y, scale: k.scale, rotation: k.rotation, opacity: k.opacity })),
       })),
+      lib: this.state.lib,
       audio: this.state.audio,
     }, null, 1);
   }
@@ -456,7 +465,16 @@ class ChaoticPuppetEditor {
     this.playBtn = btnPlay;
     const btnKey = this.btn("Key", () => this.addKeyAtPlayhead());
     const btnDelKey = this.btn("Del Key", () => this.delKeyAtPlayhead());
+    const btnSnap = this.btn("🧲 Snap", () => {
+      this.snapOn = !this.snapOn;
+      btnSnap.classList.toggle("active", this.snapOn);
+      this.updateStatus(this.snapOn ? "Snap ON — layer drags and key times land on the frame grid." : "Snap off — free placement.");
+    });
+    btnSnap.title = "snap layer drags to the frame grid";
+    const btnLib = this.btn("🧰 Library", () => this.toggleLibPanel());
+    btnLib.title = "sprite library — every imported file; drag a card back onto the stage to re-add it";
     const btnBg = this.btn("Bg", () => this.pickBackground());
+    btnBg.title = "pick a background image for the stage (keyframable from the Background panel)";
     const aspectLab = document.createElement("span");
     aspectLab.className = "pup-label";
     aspectLab.textContent = "Aspect";
@@ -483,7 +501,7 @@ class ChaoticPuppetEditor {
     const recRot = this.btn("Rot", () => this.toggleRecChannel("rot"));
     recPos.className = recSize.className = recRot.className = "pup-btn";
     this.recChanBtns = { pos: recPos, size: recSize, rot: recRot };
-    toolbar.append(btnImg, btnVid, btnText, btnBg, aspectLab, ...aspectBtns, aspectDims, btnKey, btnDelKey, btnPlay, btnRec, recPos, recSize, recRot, btnSave, btnLoad, btnClear);
+    toolbar.append(btnImg, btnVid, btnText, btnBg, aspectLab, ...aspectBtns, aspectDims, btnKey, btnDelKey, btnSnap, btnLib, btnPlay, btnRec, recPos, recSize, recRot, btnSave, btnLoad, btnClear);
     this.wrapper.appendChild(toolbar);
 
     /* stage */
@@ -527,6 +545,21 @@ class ChaoticPuppetEditor {
     this.layersPanel.appendChild(layersTitle);
     this.layersPanel.appendChild(this.layersList);
     this.wrapper.appendChild(this.layersPanel);
+
+    /* sprite library — every imported file, re-draggable onto the stage */
+    this.libPanel = document.createElement("div");
+    this.libPanel.className = "pup-panel";
+    this.libPanel.style.display = "none";
+    const libTitle = document.createElement("div");
+    libTitle.className = "pup-panel-title";
+    libTitle.innerHTML = "<span>Sprite library</span><span style='color:#666'>drag a card onto the stage to add it as a layer</span>";
+    this.libList = document.createElement("div");
+    this.libList.className = "pup-row";
+    this.libList.style.flexDirection = "column";
+    this.libList.style.alignItems = "stretch";
+    this.libPanel.appendChild(libTitle);
+    this.libPanel.appendChild(this.libList);
+    this.wrapper.appendChild(this.libPanel);
 
     /* inspector */
     this.inspector = document.createElement("div");
@@ -609,6 +642,12 @@ class ChaoticPuppetEditor {
     this.audioPanel.appendChild(this.audioTrim);
     this.wrapper.appendChild(this.audioPanel);
 
+    /* background timeline */
+    this.bgPanel = document.createElement("div");
+    this.bgPanel.className = "pup-panel";
+    this.wrapper.appendChild(this.bgPanel);
+    this.buildBgPanel();
+
     /* status */
     this.statusLine = document.createElement("div");
     this.statusLine.className = "pup-statusline";
@@ -620,6 +659,24 @@ class ChaoticPuppetEditor {
     this.canvas.addEventListener("mousedown", e => this.onStageDown(e));
     this.canvas.addEventListener("mousemove", e => this.onStageMove(e));
     this.canvas.addEventListener("mouseup", e => this.onStageUp(e));
+    this.canvas.addEventListener("contextmenu", e => {
+      e.preventDefault();
+      const layer = this.hitLayerAt(this.canvasEventPos(e).x, this.canvasEventPos(e).y);
+      if (layer) {
+        this.selectedId = layer.id;
+        this.buildInspector();
+        this.refreshLayerList();
+        this.drawStage();
+        this.updateStatus("Selected. Drag to move · corner/edge handles scale · ⭘ above rotates · the small dot moves the pivot point (the pin everything spins around).");
+      } else {
+        this.updateStatus("Right-click on a layer to select it. Drag it to move; use the gizmo handles to scale/rotate; drag the pivot dot to re-pin. Delete = remove layer / selected keyframe.");
+      }
+    });
+    this.canvas.addEventListener("keydown", e => this.onKeyDown(e));
+    this.canvas.tabIndex = 0;
+    if (typeof document.addEventListener === "function") {
+      document.addEventListener("keydown", e => this.onKeyDown(e));
+    }
     this.keyCanvas.addEventListener("mousedown", e => this.onKeyStripDown(e));
     this.wrapper.addEventListener("dragover", e => { e.preventDefault(); e.stopPropagation(); });
     this.wrapper.addEventListener("drop", e => this.onDrop(e));
@@ -719,10 +776,15 @@ class ChaoticPuppetEditor {
   }
 
   drawBackground(ctx, W, H) {
-    const bg = this.state.bg || {};
+    const bg = this.bgAt(this.playhead) || this.state.bg || {};
     if (bg.type === "image" && bg.file) {
-      const img = this._imgCache["__bg__"];
-      if (img) {
+      const key = "bg:" + bg.file;
+      let img = this._imgCache[key];
+      if (!img) {
+        img = new Image();
+        img.onload = () => { this._imgCache[key] = img; this.drawStage(); };
+        img.src = this.viewUrl(bg.file);
+      } else {
         const s = Math.max(W / Math.max(1, img.naturalWidth), H / Math.max(1, img.naturalHeight));
         const tw = img.naturalWidth * s, th = img.naturalHeight * s;
         ctx.drawImage(img, (W - tw) / 2, (H - th) / 2, tw, th);
@@ -734,6 +796,147 @@ class ChaoticPuppetEditor {
     ctx.fillRect(0, 0, W, H);
   }
 
+  /* ---------------- background timeline ---------------- */
+  bgAt(t) {
+    const frames = Array.isArray(this.state.bg && this.state.bg.frames) ? this.state.bg.frames : [];
+    if (!frames.length) return this.state.bg;
+    let cur = this.state.bg;
+    for (const e of frames) {
+      if (e.t <= t + 1e-6) cur = e;
+      else break;
+    }
+    return cur;
+  }
+
+  setBgKeyAtPlayhead() {
+    if (!this.state.bg.frames) this.state.bg.frames = [];
+    const t = Math.round(this.playhead * 1000) / 1000;
+    const cur = this.bgAt(this.playhead);
+    const entry = {
+      t,
+      type: cur.type || "color",
+      ...(cur.type === "image" && cur.file ? { file: cur.file } : { color: (cur.color || [16, 18, 22]).slice() }),
+    };
+    this.state.bg.frames = this.state.bg.frames.filter(e => Math.abs(e.t - t) > 1e-6);
+    this.state.bg.frames.push(entry);
+    this.state.bg.frames.sort((a, b) => a.t - b.t);
+    this.commitChanges();
+    this.refreshBgPanel();
+    this.updateStatus(`Background key set at ${t.toFixed(2)}s — scrub to see the background change.`);
+  }
+
+  buildBgPanel() {
+    const bgTitle = document.createElement("div");
+    bgTitle.className = "pup-panel-title";
+    bgTitle.innerHTML = "<span>Background timeline</span><span style='color:#666'>key the background like a layer</span>";
+    this.bgPanel.appendChild(bgTitle);
+    const bgRow = document.createElement("div");
+    bgRow.className = "pup-row";
+    const btnBgKey = this.btn("● Key BG at playhead", () => this.setBgKeyAtPlayhead());
+    btnBgKey.title = "snapshot the current background into a keyframe at the playhead";
+    const btnBgClear = this.btn("✕ Keys", () => { this.state.bg.frames = []; this.commitChanges(); this.refreshBgPanel(); });
+    bgRow.appendChild(btnBgKey);
+    bgRow.appendChild(btnBgClear);
+    this.bgPanel.appendChild(bgRow);
+    this.bgList = document.createElement("div");
+    this.bgList.className = "pup-row";
+    this.bgList.style.flexDirection = "column";
+    this.bgList.style.alignItems = "stretch";
+    this.bgPanel.appendChild(this.bgList);
+    this.refreshBgPanel();
+  }
+
+  refreshBgPanel() {
+    if (!this.bgList) return;
+    this.bgList.innerHTML = "";
+    const frames = (this.state.bg && this.state.bg.frames) || [];
+    if (!frames.length) {
+      const d = document.createElement("div");
+      d.className = "pup-hint";
+      d.textContent = "No background keys — the background is constant. Set the playhead, pick a color or image, then press ● Key BG at playhead to animate it.";
+      this.bgList.appendChild(d);
+      return;
+    }
+    frames.forEach((f, i) => {
+      const row = document.createElement("div");
+      row.className = "pup-layer-row";
+      row.title = "click to jump the playhead";
+      const lab = document.createElement("span");
+      lab.className = "pup-layer-name";
+      lab.textContent = f.t.toFixed(2) + "s · " + (f.type === "image" ? String(f.file || "image").split("/").pop() : "color " + JSON.stringify(f.color || []));
+      row.appendChild(lab);
+      const del = document.createElement("button");
+      del.className = "pup-btn danger";
+      del.textContent = "✕";
+      del.addEventListener("click", ev => { ev.stopPropagation(); this.state.bg.frames.splice(i, 1); this.commitChanges(); this.refreshBgPanel(); });
+      row.appendChild(del);
+      row.addEventListener("click", () => this.setPlayhead(f.t));
+      this.bgList.appendChild(row);
+    });
+  }
+
+  toggleLibPanel() {
+    this.libPanel.style.display = this.libPanel.style.display === "none" ? "" : "none";
+    if (this.libPanel.style.display !== "none") this.refreshLibPanel();
+  }
+
+  refreshLibPanel() {
+    if (!this.libList) return;
+    this.libList.innerHTML = "";
+    if (!this.state.lib.length) {
+      const d = document.createElement("div");
+      d.className = "pup-hint";
+      d.textContent = "Empty — every image/video you import lands here so you can re-add it later by dragging the card onto the stage.";
+      this.libList.appendChild(d);
+      return;
+    }
+    this.state.lib.forEach(entry => {
+      const card = document.createElement("div");
+      card.className = "pup-layer-row";
+      card.draggable = true;
+      card.title = "drag onto the stage to add this as a layer";
+      const name = document.createElement("span");
+      name.className = "pup-layer-name";
+      name.textContent = String(entry.name || entry.file || "sprite").slice(-34);
+      const type = document.createElement("span");
+      type.className = "pup-layer-type";
+      type.textContent = entry.kind || "image";
+      card.appendChild(name);
+      card.appendChild(type);
+      card.addEventListener("dragstart", ev => {
+        ev.dataTransfer.setData("text/pup-lib", entry.file);
+        ev.dataTransfer.effectAllowed = "copy";
+      });
+      this.libList.appendChild(card);
+    });
+  }
+
+  addToLib(file, name, kind) {
+    if (!file || this.state.lib.some(x => x.file === file)) return;
+    this.state.lib.push({ id: uid("lib"), file, name: name || file, kind: kind || "image" });
+  }
+
+  addSpriteLayer(file, name, kind, x, y) {
+    const layer = this.normalizeLayer({
+      id: uid("layer"),
+      type: kind === "video" ? "video" : "image",
+      name: name || "sprite",
+      file,
+      x: x != null ? clamp(x, 0, 1) : 0.5,
+      y: y != null ? clamp(y, 0, 1) : 0.5,
+      scale: 1,
+      rotation: 0,
+      opacity: 1,
+      keys: [],
+    }, this.state.layers.length);
+    this.state.layers.unshift(layer); // new layers land on top
+    this.selectedId = layer.id;
+    this.preloadSprite(layer);
+    this.commitChanges();
+    this.refreshLayerList();
+    this.buildInspector();
+  }
+
   drawLayer(ctx, layer, W, H) {
     const props = propsAt(layer, this.playhead);
     if (!props || props.opacity <= 0.001) return;
@@ -742,14 +945,19 @@ class ChaoticPuppetEditor {
     const tw = sw * s, th = sh * s;
     const cx = props.x * W, cy = props.y * H;
     const isSel = this.selectedId === layer.id;
+    const px = (layer.pivot && layer.pivot.x != null) ? layer.pivot.x : 0.5;
+    const py = (layer.pivot && layer.pivot.y != null) ? layer.pivot.y : 0.5;
     ctx.save();
     ctx.translate(cx, cy);
+    /* pivot-aware transform: the pivot point lands exactly on (cx, cy) and
+       everything rotates around it (the "pin point") */
+    ctx.translate((0.5 - px) * tw, (0.5 - py) * th);
     if (Math.abs(props.rotation) > 0.1) ctx.rotate(-props.rotation * Math.PI / 180);
     ctx.globalAlpha = props.opacity;
 
     if (layer.type === "image") {
       const img = this._imgCache[layer.id];
-      if (img) ctx.drawImage(img, -tw / 2, -th / 2, tw, th);
+      if (img) ctx.drawImage(img, -px * tw, -py * th, tw, th);
     } else if (layer.type === "video") {
       const v = this._videoEls[layer.id];
       if (v) {
@@ -757,13 +965,13 @@ class ChaoticPuppetEditor {
         const t0 = keys.length ? keys[0].t : 0;
         const mediaT = layer.trim_start + (this.playhead * (layer.speed || 1) - t0);
         if (v.readyState >= 1 && Math.abs(v.currentTime - mediaT) > 0.08) v.currentTime = mediaT;
-        ctx.drawImage(v, -tw / 2, -th / 2, tw, th);
+        ctx.drawImage(v, -px * tw, -py * th, tw, th);
       } else {
         this.drawPlaceholder(ctx, tw, th, layer);
       }
     } else if (layer.type === "text") {
-      const px = Math.max(8, layer.font_size * W);
-      ctx.font = `600 ${px}px ui-sans-serif, system-ui, sans-serif`;
+      const px2 = Math.max(8, layer.font_size * W);
+      ctx.font = `600 ${px2}px ui-sans-serif, system-ui, sans-serif`;
       ctx.textAlign = "center";
       ctx.textBaseline = "middle";
       ctx.shadowColor = "rgba(0,0,0,.8)";
@@ -777,11 +985,98 @@ class ChaoticPuppetEditor {
     ctx.restore();
 
     if (isSel) {
-      ctx.strokeStyle = "rgba(74,164,127,.9)";
-      ctx.setLineDash([4, 4]);
-      ctx.strokeRect(cx - tw / 2 - 2, cy - th / 2 - 2, tw + 4, th + 4);
-      ctx.setLineDash([]);
+      this.drawGizmo(ctx, layer, props, W, H);
     }
+  }
+
+  /* ---------------- Photoshop-style gizmo (scale / rotate / pivot) ---------------- */
+  gizmoRects(layer, props, W, H) {
+    const [tw, th] = this.fittedSize(layer, props, W, H);
+    const cx = props.x * W, cy = props.y * H;
+    const px = (layer.pivot && layer.pivot.x != null) ? layer.pivot.x : 0.5;
+    const py = (layer.pivot && layer.pivot.y != null) ? layer.pivot.y : 0.5;
+    return { cx, cy, tw, th, px, py };
+  }
+
+  pointerLocal(layer, props, W, H, mx, my) {
+    /* map a stage point into layer-local coords (origin = pivot, +y down),
+       inverting the draw transform */
+    const g = this.gizmoRects(layer, props, W, H);
+    const pvx = g.cx + (0.5 - g.px) * g.tw;
+    const pvy = g.cy + (0.5 - g.py) * g.th;
+    const dx = mx - pvx, dy = my - pvy;
+    const th0 = (props.rotation || 0) * Math.PI / 180;
+    const cos = Math.cos(th0), sin = Math.sin(th0);
+    return { x: dx * cos - dy * sin, y: dx * sin + dy * cos };
+  }
+
+  gizmoHandleAt(layer, props, W, H, mx, my) {
+    const g = this.gizmoRects(layer, props, W, H);
+    const lp = this.pointerLocal(layer, props, W, H, mx, my);
+    const HIT = 9;
+    const x0 = -g.px * g.tw, y0 = -g.py * g.th;
+    const x1 = (1 - g.px) * g.tw, y1 = (1 - g.py) * g.th;
+    const corners = {
+      nw: [x0, y0], n: [(x0 + x1) / 2, y0], ne: [x1, y0],
+      e: [x1, (y0 + y1) / 2], se: [x1, y1], s: [(x0 + x1) / 2, y1],
+      sw: [x0, y1], w: [x0, (y0 + y1) / 2],
+    };
+    for (const k of Object.keys(corners)) {
+      const [hx, hy] = corners[k];
+      if (Math.abs(lp.x - hx) <= HIT && Math.abs(lp.y - hy) <= HIT) return "scale:" + k;
+    }
+    /* rotate knob floats above the top edge — at the box midpoint, matching drawGizmo */
+    const midX = (0.5 - g.px) * g.tw;
+    if (Math.hypot(lp.x - midX, lp.y - (y0 - 20)) <= 13) return "rotate";
+    /* pivot dot at the origin */
+    if (Math.hypot(lp.x, lp.y) <= 8) return "pivot";
+    if (lp.x >= x0 - 4 && lp.x <= x1 + 4 && lp.y >= y0 - 4 && lp.y <= y1 + 4) return "move";
+    return null;
+  }
+
+  drawGizmo(ctx, layer, props, W, H) {
+    const g = this.gizmoRects(layer, props, W, H);
+    const pvx = g.cx + (0.5 - g.px) * g.tw;
+    const pvy = g.cy + (0.5 - g.py) * g.th;
+    const rot = (props.rotation || 0) * Math.PI / 180;
+    ctx.save();
+    ctx.translate(pvx, pvy);
+    if (Math.abs(rot) > 0.001) ctx.rotate(-rot);
+    ctx.strokeStyle = "rgba(126,226,168,.95)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(-g.px * g.tw, -g.py * g.th, g.tw, g.th);
+    ctx.fillStyle = "#7ee2a8";
+    /* 8 scale handles */
+    const hs = 4.5;
+    const midX = (0.5 - g.px) * g.tw;
+    const midY = (0.5 - g.py) * g.th;
+    [[-g.px * g.tw, -g.py * g.th], [midX, -g.py * g.th], [(1 - g.px) * g.tw, -g.py * g.th],
+     [(1 - g.px) * g.tw, midY], [(1 - g.px) * g.tw, (1 - g.py) * g.th], [midX, (1 - g.py) * g.th],
+     [-g.px * g.tw, (1 - g.py) * g.th], [-g.px * g.tw, midY]].forEach(([hx, hy]) => {
+      ctx.fillRect(hx - hs, hy - hs, hs * 2, hs * 2);
+    });
+    /* rotate arm + knob */
+    ctx.strokeStyle = "#ffb454";
+    ctx.lineWidth = 1.25;
+    ctx.beginPath();
+    ctx.moveTo(midX, -g.py * g.th);
+    ctx.lineTo(midX, -g.py * g.th - 20);
+    ctx.stroke();
+    ctx.fillStyle = "#ffb454";
+    ctx.beginPath();
+    ctx.arc(midX, -g.py * g.th - 20, 5, 0, Math.PI * 2);
+    ctx.fill();
+    /* pivot dot (the pin point) */
+    ctx.fillStyle = "#ffffff";
+    ctx.beginPath();
+    ctx.arc(0, 0, 3.4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#ff5a5a";
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    ctx.arc(0, 0, 5.4, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.restore();
   }
 
   drawPlaceholder(ctx, tw, th, layer) {
@@ -888,6 +1183,15 @@ class ChaoticPuppetEditor {
           ctx.stroke();
           ctx.lineWidth = 1;
         }
+        /* bright ring: this key is part of the multi-selection (Del removes all) */
+        if (this._selKeys && this._selKeys.has(layer.id + "@" + k.t)) {
+          ctx.strokeStyle = "#7ee2a8";
+          ctx.lineWidth = 1.4;
+          ctx.beginPath();
+          ctx.arc(x, laneY + KEYSTRIP_LANE_H / 2, 6.6, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.lineWidth = 1;
+        }
       });
     });
     /* playhead */
@@ -907,10 +1211,39 @@ class ChaoticPuppetEditor {
     const rect = this.keyCanvas.getBoundingClientRect();
     const w = this.keyCanvas.clientWidth || 1;
     const track = Math.max(1, w - KEYSTRIP_GUTTER);
-    const t = clamp(((e.clientX - rect.left - KEYSTRIP_GUTTER) / track) * this.durationSec, 0, this.durationSec);
-    const laneIdx = Math.floor((e.clientY - rect.top - KEYSTRIP_RULER_H) / KEYSTRIP_LANE_H);
+    const cx0 = e.clientX - rect.left;
+    const cy0 = e.clientY - rect.top;
+    const t = clamp(((cx0 - KEYSTRIP_GUTTER) / track) * this.durationSec, 0, this.durationSec);
+    const laneIdx = Math.floor((cy0 - KEYSTRIP_RULER_H) / KEYSTRIP_LANE_H);
+    /* keyframe click = select it (Shift toggles multi-select, Del removes) */
     if (laneIdx >= 0 && laneIdx < this.state.layers.length) {
-      this.selectedId = this.state.layers[laneIdx].id;
+      const layer = this.state.layers[laneIdx];
+      const laneY = KEYSTRIP_RULER_H + laneIdx * KEYSTRIP_LANE_H;
+      const speed = layer.speed && layer.speed !== 1 ? layer.speed : 1;
+      const keys = (layer.keys || []).slice().sort((a, b) => a.t - b.t);
+      let hitKey = null;
+      for (const k of keys) {
+        const kx = this.stripX(k.t / speed, w);
+        if (Math.abs(kx - cx0) <= 6 && Math.abs(cy0 - (laneY + KEYSTRIP_LANE_H / 2)) <= 7) { hitKey = k; break; }
+      }
+      if (hitKey) {
+        const sig = layer.id + "@" + hitKey.t;
+        if (e.shiftKey) {
+          if (this._selKeys.has(sig)) this._selKeys.delete(sig);
+          else this._selKeys.add(sig);
+        } else {
+          this._selKeys.clear();
+          this._selKeys.add(sig);
+        }
+        this.selectedId = layer.id;
+        this.refreshLayerList();
+        this.buildInspector();
+        this.drawKeyStrip();
+        this.updateStatus(`Keyframe selected (${this._selKeys.size} total) — Del removes, Shift+click to multi-select.`);
+        return;
+      }
+      this.selectedId = layer.id;
+      this._selKeys.clear();
       this.refreshLayerList();
       this.buildInspector();
     }
@@ -959,14 +1292,18 @@ class ChaoticPuppetEditor {
 
   recordedProps(layer, px, py) {
     /* Map the pointer to recorded values: position follows the cursor, scale
-       grows as you drag up, rotation spins around the layer's center. */
+       grows as you drag up, rotation follows the pointer's ANGLE AROUND the
+       layer's center (a delta from where the drag started) — so the layer
+       never flicks or spins wildly as the cursor crosses the center. */
     const [W, H] = this.stageSize();
     const base = propsAt(layer, this._recStartPlayhead) || layer;
     const nx = clamp(px / W, 0, 1);
     const ny = clamp(py / H, 0, 1);
-    const scale = clamp(this._recBaseScale * (1 + (this._recStartY - py) / H), 0.02, 12);
+    const scale = clamp(this._recBaseScale * (1 + (this._recStartY - py) / H), 0.02, 8);
     const [cx0, cy0] = this._recBaseCenter || [base.x * W, base.y * H];
-    const rotation = Math.atan2(py - cy0, px - cx0) * 180 / Math.PI;
+    const a0 = Math.atan2(this._recStartY - cy0, this._recStartX - cx0);
+    const a1 = Math.atan2(py - cy0, px - cx0);
+    const rotation = base.rotation + (a1 - a0) * 180 / Math.PI;
     return { x: nx, y: ny, scale, rotation };
   }
 
@@ -1029,19 +1366,57 @@ class ChaoticPuppetEditor {
     for (const layer of this.state.layers) { // top first
       const props = propsAt(layer, this.playhead);
       if (!props) continue;
-      const [tw, th] = this.fittedSize(layer, props, W, H);
-      const cx = props.x * W, cy = props.y * H;
-      if (Math.abs(px - cx) <= tw / 2 + 4 && Math.abs(py - cy) <= th / 2 + 4) return layer;
+      const g = this.gizmoRects(layer, props, W, H);
+      const left = g.cx + (0.5 - g.px) * g.tw - g.px * g.tw;
+      const top = g.cy + (0.5 - g.py) * g.th - g.py * g.th;
+      if (px >= left - 4 && px <= left + g.tw + 4 && py >= top - 4 && py <= top + g.th + 4) return layer;
     }
     return null;
   }
 
-  onStageDown(e) {
+  canvasEventPos(e) {
     const rect = this.canvas.getBoundingClientRect();
     const scaleX = this.canvas.clientWidth / Math.max(1, rect.width);
     const scaleY = this.canvas.clientHeight / Math.max(1, rect.height);
-    const px = (e.clientX - rect.left) * scaleX;
-    const py = (e.clientY - rect.top) * scaleY;
+    return { x: (e.clientX - rect.left) * scaleX, y: (e.clientY - rect.top) * scaleY };
+  }
+
+  snapVal(v, step) {
+    return this.snapOn ? Math.round(v / step) * step : v;
+  }
+
+  onStageDown(e) {
+    const { x: px, y: py } = this.canvasEventPos(e);
+    const [W, H] = this.stageSize();
+    /* gizmo handles first — they act on the SELECTED layer even under others */
+    const selLayer = this.selectedId ? this.layerById(this.selectedId) : null;
+    if (selLayer) {
+      const props = propsAt(selLayer, this.playhead);
+      if (props) {
+        let handle = this.gizmoHandleAt(selLayer, props, W, H, px, py);
+        if (handle === "rotate") {
+          const g = this.gizmoRects(selLayer, props, W, H);
+          const pvx = g.cx + (0.5 - g.px) * g.tw, pvy = g.cy + (0.5 - g.py) * g.th;
+          this._drag = { layerId: selLayer.id, mode: "rotate", startX: px, startY: py, baseRot: props.rotation, startAng: Math.atan2(py - pvy, px - pvx) };
+          this.canvas.style.cursor = "crosshair";
+          return;
+        }
+        if (handle === "pivot") {
+          if (!e.altKey) {
+            /* the pivot dot needs Alt to grab — plain clicks on the layer body move it */
+            handle = null;
+          } else {
+            this._drag = { layerId: selLayer.id, mode: "pivot", startX: px, startY: py };
+            this.updateStatus("Dragging the pin point (Alt) — everything rotates/scales around this spot.");
+            return;
+          }
+        }
+        if (handle && handle.startsWith("scale:")) {
+          this._drag = { layerId: selLayer.id, mode: "scale", handle: handle.split(":")[1], startX: px, startY: py };
+          return;
+        }
+      }
+    }
     const layer = this.hitLayerAt(px, py);
     if (layer) {
       this.selectedId = layer.id;
@@ -1050,16 +1425,16 @@ class ChaoticPuppetEditor {
       this.drawStage();
       /* anchor to the layer's DRAWN position (interpolated), not the static default */
       const props = propsAt(layer, this.playhead) || { x: layer.x, y: layer.y };
-      const [W, H] = this.stageSize();
       /* nx/ny seed the move-dedup guard with the DRAWN position so the first
          real move is processed (the old `_drag.nx || nx` fallback swallowed it) */
-      this._drag = { layerId: layer.id, startX: px, startY: py, dx: props.x - px / W, dy: props.y - py / H, nx: props.x, ny: props.y };
+      this._drag = { layerId: layer.id, startX: px, startY: py, dx: props.x - px / W, dy: props.y - py / H, nx: this.snapVal(props.x, 0.01), ny: this.snapVal(props.y, 0.01) };
       if (this._recArmed) {
         this._recCapturing = true;
         this._recStart = performance.now();
         this._recStartPlayhead = this.playhead;
         this._recLastSample = 0;
         this._recStartY = py;
+        this._recStartX = px;
         this._recBaseScale = props.scale;
         this._recBaseCenter = [props.x * W, props.y * H];
         this.updateStatus("Recording… drag to perform the motion (the playhead advances). Release to finish the take.");
@@ -1074,17 +1449,65 @@ class ChaoticPuppetEditor {
 
   onStageMove(e) {
     if (!this._drag) return;
-    const rect = this.canvas.getBoundingClientRect();
-    const scaleX = this.canvas.clientWidth / Math.max(1, rect.width);
-    const scaleY = this.canvas.clientHeight / Math.max(1, rect.height);
-    const px = (e.clientX - rect.left) * scaleX;
-    const py = (e.clientY - rect.top) * scaleY;
+    const { x: px, y: py } = this.canvasEventPos(e);
     const layer = this.layerById(this._drag.layerId);
     if (!layer) return;
     const [W, H] = this.stageSize();
-    const nx = clamp((px / W) + this._drag.dx, 0, 1);
-    const ny = clamp((py / H) + this._drag.dy, 0, 1);
-    if (Math.abs(nx - (this._drag.nx || nx)) < 1e-9 && Math.abs(ny - (this._drag.ny || ny)) < 1e-9) return;
+    const mode = this._drag.mode || "move";
+    if (mode === "rotate") {
+      const props = propsAt(layer, this.playhead) || layer;
+      const g = this.gizmoRects(layer, props, W, H);
+      const pvx = g.cx + (0.5 - g.px) * g.tw, pvy = g.cy + (0.5 - g.py) * g.th;
+      const ang = Math.atan2(py - pvy, px - pvx) * 180 / Math.PI;
+      let rot = this._drag.baseRot + (ang - this._drag.startAng);
+      rot = ((rot % 360) + 360) % 360;
+      if (this.snapOn) rot = Math.round(rot / 5) * 5;
+      const key = this.ensureKeyAtPlayhead(layer);
+      key.rotation = rot;
+      layer.rotation = rot;
+      this.commitChanges();
+      return;
+    }
+    if (mode === "pivot") {
+      const props = propsAt(layer, this.playhead) || layer;
+      const g = this.gizmoRects(layer, props, W, H);
+      const lp = this.pointerLocal(layer, props, W, H, px, py);
+      layer.pivot = {
+        x: clamp((lp.x + g.px * g.tw) / g.tw, 0, 1),
+        y: clamp((lp.y + g.py * g.th) / g.th, 0, 1),
+      };
+      this.commitChanges();
+      this.drawStage();
+      return;
+    }
+    if (mode === "scale") {
+      const props = propsAt(layer, this.playhead) || layer;
+      const g = this.gizmoRects(layer, props, W, H);
+      const lp = this.pointerLocal(layer, props, W, H, px, py);
+      const slp = this.pointerLocal(layer, props, W, H, this._drag.startX, this._drag.startY);
+      const dir = { nw: [-1, -1], n: [0, -1], ne: [1, -1], e: [1, 0], se: [1, 1], s: [0, 1], sw: [-1, 1], w: [-1, 0] }[this._drag.handle] || [1, 1];
+      let kx = 1, ky = 1;
+      if (dir[0] !== 0) kx = slp.x !== 0 ? lp.x / slp.x : 1;
+      if (dir[1] !== 0) ky = slp.y !== 0 ? lp.y / slp.y : 1;
+      if (dir[0] !== 0 && dir[1] !== 0) {
+        const k = Math.max(Math.abs(kx), Math.abs(ky));
+        kx = ky = (Math.sign(kx) || 1) * k;
+      }
+      const k = Math.max(Math.abs(kx), Math.abs(ky), 0.001);
+      const newScale = clamp(props.scale * k, 0.02, 12);
+      const key = this.ensureKeyAtPlayhead(layer);
+      key.scale = newScale;
+      layer.scale = newScale;
+      /* keep the pivot pixel fixed while the box grows/shrinks */
+      const newTw = g.tw * k, newTh = g.th * k;
+      key.x = layer.x = clamp((g.cx + (0.5 - g.px) * g.tw - (0.5 - g.px) * newTw) / W, 0, 1);
+      key.y = layer.y = clamp((g.cy + (0.5 - g.py) * g.th - (0.5 - g.py) * newTh) / H, 0, 1);
+      this.commitChanges();
+      return;
+    }
+    const nx = this.snapVal(clamp((px / W) + this._drag.dx, 0, 1), 0.01);
+    const ny = this.snapVal(clamp((py / H) + this._drag.dy, 0, 1), 0.01);
+    if (Math.abs(nx - (this._drag.nx != null ? this._drag.nx : nx)) < 1e-9 && Math.abs(ny - (this._drag.ny != null ? this._drag.ny : ny)) < 1e-9) return;
     this._drag.nx = nx;
     this._drag.ny = ny;
     if (this._recCapturing) {
@@ -1119,6 +1542,41 @@ class ChaoticPuppetEditor {
       this.updateStatus("Take recorded — REC is still armed: scrub back, pose, and record again, or press ■ STOP. Record Size/Rot separately for fast edits.");
     }
     this._drag = null;
+    if (this.canvas) this.canvas.style.cursor = "crosshair";
+  }
+
+  onKeyDown(e) {
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || (t.isContentEditable))) return;
+    if (e.key === "Delete" || e.key === "Backspace") {
+      if (this._selKeys && this._selKeys.size) {
+        e.preventDefault();
+        this._selKeys.forEach(k => {
+          const [lid, t0] = String(k).split("@");
+          const layer = this.layerById(lid);
+          if (layer) layer.keys = (layer.keys || []).filter(kk => Math.abs(kk.t - Number(t0)) > 1e-6);
+        });
+        this._selKeys.clear();
+        this.commitChanges();
+        this.buildInspector();
+        this.updateStatus(this._selKeys.size + " selected keyframe(s) deleted.");
+      } else if (this.selectedId) {
+        e.preventDefault();
+        this.state.layers = this.state.layers.filter(l => l.id !== this.selectedId);
+        this.selectedId = null;
+        this.commitChanges();
+        this.buildInspector();
+        this.refreshLayerList();
+        this.updateStatus("Layer deleted.");
+      }
+    } else if (e.key === "Escape") {
+      if (this._selKeys) this._selKeys.clear();
+      this.selectedId = null;
+      this.buildInspector();
+      this.refreshLayerList();
+      this.drawKeyStrip();
+      this.drawStage();
+    }
   }
 
   /* ---------------- playback ---------------- */
@@ -1621,10 +2079,10 @@ class ChaoticPuppetEditor {
       if (!path) return;
       this.state.bg = { type: "image", file: path };
       const img = new Image();
-      img.onload = () => { this._imgCache["__bg__"] = img; this.commitChanges(); };
+      img.onload = () => { this._imgCache["bg:" + path] = img; this.commitChanges(); };
       img.src = this.viewUrl(path);
       this.commitChanges();
-      this.updateStatus("Background set.");
+      this.updateStatus("Background set — press ● Key BG at playhead to make it change over time.");
     } catch (err) {
       console.error("[ChaoticPuppet] bg import failed", err);
     }
@@ -1634,25 +2092,10 @@ class ChaoticPuppetEditor {
     try {
       const path = await this.upload(file);
       if (!path) return;
-      const layer = this.normalizeLayer({
-        id: uid("layer"),
-        type: kind,
-        name: file.name,
-        file: path,
-        x: 0.5,
-        y: 0.5,
-        scale: 1,
-        rotation: 0,
-        opacity: 1,
-        keys: [],
-      }, this.state.layers.length);
-      this.state.layers.unshift(layer); // new layers land on top
-      this.selectedId = layer.id;
-      this.preloadSprite(layer);
-      this.commitChanges();
-      this.refreshLayerList();
-      this.buildInspector();
-      this.updateStatus(`Added ${kind} layer. Pose it, press Key, move the playhead, pose again.`);
+      this.addToLib(path, file.name, kind);
+      this.addSpriteLayer(path, file.name, kind, 0.5, 0.5);
+      this.refreshLibPanel();
+      this.updateStatus(`Added ${kind} layer (also saved to the sprite library). Pose it, press Key, move the playhead, pose again.`);
     } catch (err) {
       console.error("[ChaoticPuppet] import failed", err);
       this.updateStatus("Import failed: " + (err && err.message ? err.message : err));
@@ -1680,21 +2123,8 @@ class ChaoticPuppetEditor {
           skipped++; // already on the stage — never duplicate a layer
           continue;
         }
-        const layer = this.normalizeLayer({
-          id: uid("layer"),
-          type: "image",
-          name: c.note ? c.note : "crop @" + (c.at != null ? c.at : 0) + "s",
-          file: c.file,
-          x: 0.5,
-          y: 0.5,
-          scale: 1,
-          rotation: 0,
-          opacity: 1,
-          keys: [],
-        }, this.state.layers.length);
-        this.state.layers.unshift(layer); // crops land on top, like any new sprite
-        this.selectedId = layer.id;
-        this.preloadSprite(layer);
+        this.addToLib(c.file, c.note ? c.note : "crop @" + (c.at != null ? c.at : 0) + "s", "image");
+        this.addSpriteLayer(c.file, c.note ? c.note : "crop @" + (c.at != null ? c.at : 0) + "s", "image", 0.5, 0.5);
         added++;
       }
       if (added) {
@@ -1747,7 +2177,25 @@ class ChaoticPuppetEditor {
   onDrop(e) {
     e.preventDefault();
     e.stopPropagation();
-    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    const dt = e.dataTransfer;
+    const libFile = dt ? dt.getData("text/pup-lib") : "";
+    if (libFile) {
+      const entry = this.state.lib.find(x => x.file === libFile);
+      if (entry) {
+        let x = 0.5, y = 0.5;
+        if (this.canvas) {
+          const rect = this.canvas.getBoundingClientRect();
+          if (e.clientX >= rect.left && e.clientX <= rect.right && e.clientY >= rect.top && e.clientY <= rect.bottom) {
+            x = clamp((e.clientX - rect.left) / Math.max(1, rect.width), 0, 1);
+            y = clamp((e.clientY - rect.top) / Math.max(1, rect.height), 0, 1);
+          }
+        }
+        this.addSpriteLayer(entry.file, entry.name || "sprite", entry.kind || "image", x, y);
+        this.updateStatus("Library sprite added as a layer — drag it to pose.");
+        return;
+      }
+    }
+    const files = Array.from((dt && dt.files) || []);
     files.forEach(f => {
       const kind = f.type.startsWith("video/") ? "video" : f.type.startsWith("audio/") ? "audio" : "image";
       if (kind === "audio") this.importAudio(f);

@@ -19,8 +19,9 @@ const VIDEO_TRACK_Y = PICTURE_TRACK_Y + TRACK_H;
 const AUDIO_TRACK_Y = VIDEO_TRACK_Y + TRACK_H;
 const SHOT_TRACK_Y = AUDIO_TRACK_Y + TRACK_H;
 const TIMELINE_H = SHOT_TRACK_Y + TRACK_H;
-const PREVIEW_H = 154;
+const PREVIEW_H = 190;
 const HANDLE_PX = 10;
+const HANDLE_HIT = 7;
 const MIN_DURATION = 0.5;
 const MAX_REF_IMAGES = 9;
 
@@ -80,10 +81,10 @@ const CSS = `
 .chaotic-txtarea{position:relative;background:transparent;color:#e8e8e8}
 .chaotic-statusline{font-size:10px;color:#9a9a9a;min-height:14px}
 /* scrub preview strip */
-.chaotic-preview-stage{position:relative;background:#000;border:1px solid #1c1c1c;border-radius:5px;height:88px;overflow:hidden;display:flex;align-items:center;justify-content:center;flex:none}
+.chaotic-preview-stage{position:relative;background:#000;border:1px solid #1c1c1c;border-radius:5px;height:118px;overflow:hidden;display:flex;align-items:center;justify-content:center;flex:none}
 .chaotic-preview-stage video{max-width:100%;max-height:100%;display:none;background:#000}
 .chaotic-preview-stage img{max-width:100%;max-height:100%;display:none;object-fit:contain;background:#000}
-.chaotic-preview-stage canvas.chaotic-preview-wave{width:100%;height:88px;display:none;background:#000;border-radius:4px}
+.chaotic-preview-stage canvas.chaotic-preview-wave{width:100%;height:118px;display:none;background:#000;border-radius:4px}
 .chaotic-preview-hint{color:#666;font-size:10px;text-align:center;padding:8px;line-height:1.5}
 .chaotic-preview-controls{display:flex;gap:6px;align-items:center;flex:none}
 .chaotic-preview-seek{flex:1;accent-color:#ff5a5a;height:4px}
@@ -96,15 +97,43 @@ const CSS = `
 .chaotic-lib-drop:hover{border-color:#666;color:#aaa}
 .chaotic-lib-drop.drag-over{border-color:#4aa47f;background:rgba(74,164,127,.08);color:#7ee2a8}
 .chaotic-lib-grid{display:flex;flex-direction:column;gap:5px}
-.chaotic-lib-card{display:flex;gap:8px;align-items:center;background:#141414;border:1px solid #2a2a2a;border-radius:6px;padding:5px 7px}
+.chaotic-lib-card{display:grid;grid-template-columns:52px minmax(0,1fr) 52px auto auto auto;gap:6px;align-items:center;background:#141414;border:1px solid #2a2a2a;border-radius:6px;padding:5px 7px}
 .chaotic-lib-thumb{width:52px;height:34px;object-fit:cover;border-radius:3px;background:#000;flex:none}
 .chaotic-lib-meta{flex:1;min-width:0;display:flex;flex-direction:column;gap:2px}
 .chaotic-lib-name{font-size:10.5px;color:#e8e8e8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .chaotic-lib-tag{font-size:9.5px;color:#7ee2a8;font-family:ui-monospace,Menlo,monospace}
-.chaotic-lib-strength{width:64px;accent-color:#4aa47f;height:4px}
+.chaotic-lib-strength{width:52px;accent-color:#4aa47f;height:4px;justify-self:end}
 .chaotic-lib-empty{font-size:10px;color:#666;padding:4px 2px}
 .chaotic-lib-hint{font-size:10px;color:#8a8a8a;line-height:1.5;padding:2px 0}
 .chaotic-range-flag{position:absolute;top:0;font-size:8px;font-weight:700;font-family:ui-monospace,Menlo,monospace;padding:0 2px;pointer-events:none}
+/* inspector grid: pack the small rows two-up so the panel stays short */
+.chaotic-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:4px 12px;align-items:center}
+.chaotic-grid .chaotic-row{flex-wrap:nowrap}
+.chaotic-grid .chaotic-row .chaotic-input[type=number]{width:54px}
+.chaotic-grid-full{grid-column:1/-1}
+.chaotic-minirow{display:flex;gap:5px;align-items:center;flex-wrap:wrap}
+/* timeline settings toolbar (snap / unit / overlap-lock) */
+.chaotic-ttoolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:3px 0;border-top:1px solid #242424;border-bottom:1px solid #242424;margin-top:2px}
+.chaotic-ttoolbar .chaotic-seg div{padding:3px 8px;font-size:10px}
+.chaotic-ttoolbar .chaotic-btn{padding:3px 8px;font-size:10px}
+.chaotic-ttoolbar .chaotic-btn.active{background:#1c2b22;border-color:#2f7a50;color:#7ee2a8}
+.chaotic-ttoolbar .chaotic-btn.warn-active{background:#3a2f12;border-color:#7a642f;color:#ffd479}
+.chaotic-tlabel{font-size:9.5px;color:#8a8a8a;white-space:nowrap}
+/* right-click context menu */
+.chaotic-ctx{position:fixed;z-index:99998;background:#1b1b1b;border:1px solid #3a3a3a;border-radius:6px;padding:4px;min-width:168px;box-shadow:0 8px 24px rgba(0,0,0,.7);display:none}
+.chaotic-ctx-item{display:flex;align-items:center;gap:6px;padding:5px 9px;font-size:10.5px;color:#ddd;cursor:pointer;border-radius:4px;white-space:nowrap}
+.chaotic-ctx-item:hover{background:#2a2a2a;color:#fff}
+.chaotic-ctx-item.danger{color:#ff9d9d}
+.chaotic-ctx-item.danger:hover{background:#3a1515;color:#ffb0b0}
+.chaotic-ctx-sep{height:1px;background:#2c2c2c;margin:3px 4px}
+.chaotic-ctx-sub{color:#8a8a8a;font-size:9.5px;padding:4px 9px 2px;letter-spacing:.05em}
+/* inline tag autosuggest menu (typing < in a shot prompt) */
+.chaotic-tagmenu{position:fixed;z-index:99997;background:#161616;border:1px solid #3a3a3a;border-radius:6px;padding:3px;min-width:150px;box-shadow:0 8px 24px rgba(0,0,0,.7);display:none;max-height:180px;overflow:auto}
+.chaotic-tagmenu div{padding:4px 9px;font-size:10.5px;color:#cdeadd;cursor:pointer;border-radius:4px;font-family:ui-monospace,Menlo,monospace}
+.chaotic-tagmenu div:hover{background:#24443a;color:#7ee2a8}
+.chaotic-tagmenu .chaotic-tagmenu-hint{color:#666;font-size:9px;font-family:inherit;cursor:default}
+.chaotic-tagmenu .chaotic-tagmenu-hint:hover{background:none;color:#666}
+.chaotic-edit-badge{display:inline-block;background:#7a3a1a;color:#ffb454;font-size:8px;font-weight:700;padding:0 3px;border-radius:3px;margin-left:4px;vertical-align:middle}
 `;
 
 if (!document.getElementById("chaotic-director-styles")) {
@@ -175,7 +204,7 @@ class ChaoticDirectorEditor {
     this.container = container;
     this.domWidget = domWidget;
 
-    this.state = { project: this.defaultProject(), shots: [], refs: [], boundaries: [] };
+    this.state = { project: this.defaultProject(), shots: [], refs: [], boundaries: [], snap: { on: false, unit: "frame" }, overlap_lock: false };
     this.fps = 24;
     this.zoom = 1;
     this.selectedType = null;   // "shot" | "ref"
@@ -190,6 +219,9 @@ class ChaoticDirectorEditor {
     this.renderOut = null;     // render window OUT (seconds), null = end
     this._previewRefId = null; // ref currently loaded into the preview video
     this._librarySig = null;   // cache key for the library grid
+    this._lastClient = null;   // last pointer position in client coords (drag-to-library)
+    this._ctxMenu = null;      // open right-click menu
+    this._ctxClose = null;
 
     this.timelineDataWidget = node.widgets.find(w => w.name === "timeline_data");
     this.chunkModeWidget = node.widgets.find(w => w.name === "chunk_mode");
@@ -229,6 +261,10 @@ class ChaoticDirectorEditor {
       shots: Array.isArray(raw.shots) ? raw.shots.map((s, i) => this.normalizeShot(s, i)) : [],
       refs: Array.isArray(raw.refs) ? raw.refs.map((r, i) => this.normalizeRef(r, i)) : [],
       boundaries: Array.isArray(raw.boundaries) ? raw.boundaries.map(Number).filter(b => b > 0) : [],
+      snap: raw.snap && typeof raw.snap === "object"
+        ? { on: !!raw.snap.on, unit: raw.snap.unit === "second" ? "second" : "frame" }
+        : { on: false, unit: "frame" },
+      overlap_lock: raw.overlap_lock === true,
     };
     this.renderIn = raw.render_in == null ? null : Number(raw.render_in);
     this.renderOut = raw.render_out == null ? null : Number(raw.render_out);
@@ -270,7 +306,7 @@ class ChaoticDirectorEditor {
       duration: Math.max(MIN_DURATION, Number(r.duration) || 1),
       trim_start: Number(r.trim_start) || 0,
       trim_end: r.trim_end == null ? null : Number(r.trim_end),
-      strength: clamp(Number(r.strength) != null ? Number(r.strength) : 1, 0, 1),
+      strength: (() => { const s = Number(r.strength); return clamp(Number.isFinite(s) ? s : 1, 0, 1); })(),
       role: r.role === "source" ? "source" : "reference",
       annotation: r.annotation || "",
       tag_type: r.tag_type === "subject" ? "subject" : "picture",
@@ -320,6 +356,8 @@ class ChaoticDirectorEditor {
         tag_type: r.tag_type, use_soundtrack: r.use_soundtrack, timed: r.timed,
       })),
       boundaries: this.state.boundaries,
+      snap: this.state.snap,
+      overlap_lock: this.state.overlap_lock,
       render_in: this.renderIn,
       render_out: this.renderOut,
     }, null, 1);
@@ -461,6 +499,57 @@ class ChaoticDirectorEditor {
     this.buildPreviewStrip();
     this.wrapper.appendChild(this.previewPanel);
 
+    /* timeline settings toolbar (snap / frame-second / overlap lock) */
+    this.ttoolbar = document.createElement("div");
+    this.ttoolbar.className = "chaotic-ttoolbar";
+    const tSnap = document.createElement("button");
+    tSnap.className = "chaotic-btn";
+    tSnap.textContent = "🧲 Snap";
+    tSnap.title = "snap shot/ref moves and trims to whole frames or whole seconds";
+    tSnap.addEventListener("click", () => {
+      this.state.snap.on = !this.state.snap.on;
+      tSnap.classList.toggle("warn-active", this.state.snap.on);
+      this.commitChanges();
+      this.updateStatus(this.state.snap.on ? `Snap ON — ${this.state.snap.unit === "frame" ? "frames" : "seconds"} (${this.state.snap.unit === "frame" ? "1/" + (this.fps || 24) + "s" : "1s"} grid).` : "Snap off — free placement.");
+    });
+    const tUnit = document.createElement("div");
+    tUnit.className = "chaotic-seg";
+    tUnit.title = "snap grid unit";
+    ["frame", "second"].forEach(u => {
+      const d = document.createElement("div");
+      d.textContent = u === "frame" ? "Frame" : "Sec";
+      d.className = this.state.snap.unit === u ? "on" : "";
+      d.addEventListener("click", () => {
+        this.state.snap.unit = u;
+        this.ttoolbar.querySelectorAll(".chaotic-seg div").forEach(x => x.classList.remove("on"));
+        d.classList.add("on");
+        this.commitChanges();
+        this.updateStatus(`Snap unit: ${u === "frame" ? "1 frame @ " + (this.fps || 24) + "fps" : "1 second"}.`);
+      });
+      tUnit.appendChild(d);
+    });
+    const tOverlap = document.createElement("button");
+    tOverlap.className = "chaotic-btn";
+    tOverlap.textContent = "⛔ Overlap";
+    tOverlap.title = "lock overlap — shots cannot slide over each other on the prompt track";
+    tOverlap.addEventListener("click", () => {
+      this.state.overlap_lock = !this.state.overlap_lock;
+      tOverlap.classList.toggle("warn-active", this.state.overlap_lock);
+      this.commitChanges();
+      this.updateStatus(this.state.overlap_lock ? "Overlap lock ON — shots are blocked from overlapping each other." : "Overlap lock off — shots may overlap freely.");
+    });
+    this.snapBtn = tSnap;
+    this.overlapBtn = tOverlap;
+    this.ttoolbar.appendChild(tSnap);
+    this.ttoolbar.appendChild(tUnit);
+    this.ttoolbar.appendChild(tOverlap);
+    const tZoom = document.createElement("span");
+    tZoom.className = "chaotic-tlabel";
+    tZoom.textContent = "Ctrl+wheel to zoom";
+    this.zoomLabel = tZoom;
+    this.ttoolbar.appendChild(tZoom);
+    this.wrapper.appendChild(this.ttoolbar);
+
     /* timeline viewport */
     this.viewport = document.createElement("div");
     this.viewport.className = "chaotic-viewport";
@@ -471,10 +560,17 @@ class ChaoticDirectorEditor {
     this.viewport.appendChild(this.canvas);
     this.wrapper.appendChild(this.viewport);
 
-    /* inspector */
+    /* inspector (collapsible, like the library) */
     this.inspector = document.createElement("div");
-    this.inspector.className = "chaotic-panel";
-    this.inspector.style.display = "none";
+    this.inspector.className = "chaotic-collapse";
+    this.inspector.innerHTML = `
+      <div class="chaotic-collapse-head"><span>Inspector / parameters</span><span style="color:#666">▾</span></div>
+      <div class="chaotic-collapse-body"></div>`;
+    this.inspector.querySelector(".chaotic-collapse-head").addEventListener("click", () => {
+      this.inspector.classList.toggle("open");
+      this.recomputeSize();
+    });
+    this.inspBody = this.inspector.querySelector(".chaotic-collapse-body");
     this.wrapper.appendChild(this.inspector);
 
     /* status line */
@@ -494,6 +590,15 @@ class ChaoticDirectorEditor {
     this.canvas.addEventListener("mousemove", e => this.onMouseMove(e));
     this.canvas.addEventListener("mouseup", e => this.onMouseUp(e));
     this.canvas.addEventListener("dblclick", e => this.onDblClick(e));
+    this.canvas.addEventListener("contextmenu", e => this.onContextMenu(e));
+    this.canvas.addEventListener("keydown", e => this.onKeyDown(e));
+    this.canvas.tabIndex = 0;
+    if (typeof document.addEventListener === "function") {
+      document.addEventListener("keydown", e => this.onKeyDown(e));
+      /* the canvas can't see a mouseup released over the library panel —
+         listen at document level for the drag-to-library check */
+      document.addEventListener("mouseup", e => this.onMouseUp(e));
+    }
     this.canvas.addEventListener("wheel", e => {
       if (e.ctrlKey || e.metaKey) {
         e.preventDefault();
@@ -606,14 +711,17 @@ class ChaoticDirectorEditor {
   }
 
   buildInspector() {
-    const ins = this.inspector;
+    const ins = this.inspBody;
     ins.innerHTML = "";
-    ins.style.display = "none";
-    if (!this.selectedType || !this.selectedId) return;
-
+    this.inspector.classList.remove("open");
+    if (!this.selectedType || !this.selectedId) {
+      this.recomputeSize();
+      return;
+    }
     if (this.selectedType === "shot") this.buildShotInspector(ins);
     else this.buildRefInspector(ins);
-    ins.style.display = "flex";
+    this.inspector.classList.add("open");
+    this.recomputeSize();
   }
 
   buildShotInspector(ins) {
@@ -691,11 +799,35 @@ class ChaoticDirectorEditor {
       back.innerHTML = this.highlighted(ta.value, shot, tags, shorthands);
       syncBack();
     };
-    ta.addEventListener("input", () => { shot.text = ta.value; updateHighlight(); this.commitChanges(); });
+    ta.addEventListener("input", () => { shot.text = ta.value; updateHighlight(); this.commitChanges(); this.maybeTagSuggest(ta); });
+    ta.addEventListener("keyup", e => { if (e.key === "Escape") this.closeTagMenu(); this.maybeTagSuggest(ta); });
+    ta.addEventListener("blur", () => setTimeout(() => this.closeTagMenu(), 150));
     ta.addEventListener("scroll", syncBack);
     wrap.appendChild(back);
     wrap.appendChild(ta);
     ins.appendChild(wrap);
+
+    /* one-click tag chips — every available tag, insert at the caret */
+    const avail = this.state.refs.map(r => ({ token: tags[r.id] || (r.kind === "subject" ? (shorthands[r.id] || "") : ""), ref: r })).filter(x => x.token);
+    if (avail.length) {
+      const chips = document.createElement("div");
+      chips.className = "chaotic-chips";
+      const chipLab = document.createElement("span");
+      chipLab.className = "chaotic-tlabel";
+      chipLab.textContent = "Insert:";
+      chips.appendChild(chipLab);
+      avail.forEach(({ token, ref }) => {
+        const chip = document.createElement("div");
+        chip.className = "chaotic-chip ok";
+        chip.textContent = token;
+        chip.title = "click to insert at the cursor — " + (ref.name || ref.file || ref.kind);
+        chip.addEventListener("click", () => this.insertTagAtCaret(ta, token));
+        chip.addEventListener("mouseenter", ev => this.showThumb(ev, ref.id, ref));
+        chip.addEventListener("mouseleave", () => this.hideThumb());
+        chips.appendChild(chip);
+      });
+      ins.appendChild(chips);
+    }
 
     const chips = document.createElement("div");
     chips.className = "chaotic-chips";
@@ -703,12 +835,15 @@ class ChaoticDirectorEditor {
     status.className = "chaotic-statusline";
     const found = this.validateTags(ta.value, shot, tags, shorthands);
     if (found.length === 0) {
-      status.textContent = "No reference tags in this block.";
+      status.textContent = avail.length
+        ? "No tags typed yet — the block is not linked to any reference. Click a chip above (or type < for autosuggest) to bind one."
+        : "No reference tags in this block — add refs to the timeline or library first.";
     }
     found.forEach(item => {
       const chip = document.createElement("div");
       chip.className = "chaotic-chip " + item.status;
       chip.textContent = `${item.token} · ${item.label}`;
+      chip.title = item.status === "ok" ? "active during this shot" : item.status === "warn" ? "this ref is not active during this shot's window" : "unknown tag";
       chip.addEventListener("mouseenter", ev => this.showThumb(ev, item.refId, item.ref));
       chip.addEventListener("mouseleave", () => this.hideThumb());
       chips.appendChild(chip);
@@ -716,6 +851,58 @@ class ChaoticDirectorEditor {
     ins.appendChild(chips);
     ins.appendChild(status);
     this.updateStatus(found.length ? "Tags validated against the timeline." : "");
+  }
+
+  /* ---------------- inline tag autosuggest (type < or <P …) ---------------- */
+  insertTagAtCaret(ta, token) {
+    const pos = ta.selectionStart != null ? ta.selectionStart : ta.value.length;
+    ta.value = ta.value.slice(0, pos) + token + ta.value.slice(pos);
+    ta.selectionStart = ta.selectionEnd = pos + token.length;
+    ta.dispatchEvent(new Event("input", { bubbles: true }));
+    ta.focus();
+  }
+
+  maybeTagSuggest(ta) {
+    const before = ta.value.slice(0, ta.selectionStart != null ? ta.selectionStart : ta.value.length);
+    const m = before.match(/<([A-Za-z]*)$/);
+    if (!m) { this.closeTagMenu(); return; }
+    const prefix = m[1].toLowerCase();
+    const tags = this.globalTags();
+    const shorthands = this.shorthands();
+    const seen = new Set();
+    const cands = [];
+    this.state.refs.forEach(r => {
+      const t = tags[r.id] || (r.kind === "subject" ? (shorthands[r.id] || "") : "");
+      if (t && !seen.has(t)) { seen.add(t); cands.push(t); }
+    });
+    const filtered = prefix ? cands.filter(t => t.toLowerCase().startsWith("<" + prefix)) : cands;
+    if (!filtered.length) { this.closeTagMenu(); return; }
+    const rect = ta.getBoundingClientRect();
+    const lineH = parseFloat(getComputedStyle(ta).lineHeight) || 16;
+    const x = rect.left + 8;
+    const y = rect.top + 26;
+    const menu = document.createElement("div");
+    menu.className = "chaotic-tagmenu";
+    filtered.slice(0, 12).forEach(tok => {
+      const d = document.createElement("div");
+      d.textContent = tok;
+      d.addEventListener("mousedown", ev => { ev.preventDefault(); this.insertTagAtCaret(ta, tok); this.closeTagMenu(); });
+      menu.appendChild(d);
+    });
+    const hint = document.createElement("div");
+    hint.className = "chaotic-tagmenu-hint";
+    hint.textContent = "← click to insert";
+    menu.appendChild(hint);
+    document.body.appendChild(menu);
+    menu.style.display = "block";
+    menu.style.left = Math.min(x, window.innerWidth - 170) + "px";
+    menu.style.top = y + "px";
+    if (this._tagMenu) this._tagMenu.remove();
+    this._tagMenu = menu;
+  }
+
+  closeTagMenu() {
+    if (this._tagMenu) { this._tagMenu.remove(); this._tagMenu = null; }
   }
 
   highlighted(text, shot, tags, shorthands) {
@@ -854,17 +1041,19 @@ class ChaoticDirectorEditor {
     fileRow.innerHTML = `<span class="chaotic-label" style="max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${escapeHtml(ref.file)}">${escapeHtml(ref.file || "no file")}</span>`;
     ins.appendChild(fileRow);
 
+    /* two-column grid for the compact rows (keeps the panel short) */
+    const grid = document.createElement("div");
+    grid.className = "chaotic-grid";
+
     /* preview + placement */
     const prevRow = document.createElement("div");
     prevRow.className = "chaotic-row";
     const prevBtn = this.btn("▶ Preview", () => this.previewRef(ref.id));
+    prevBtn.title = "play this reference in the preview strip (or jump the playhead to it)";
     prevRow.appendChild(prevBtn);
-    ins.appendChild(prevRow);
-    const placeRow = document.createElement("div");
-    placeRow.className = "chaotic-row";
-    placeRow.innerHTML = '<span class="chaotic-label">Placement</span>';
     const placeSeg = document.createElement("div");
     placeSeg.className = "chaotic-seg";
+    placeSeg.title = "timeline = part of the video edit; library = reference only, never on the timeline";
     [["timeline", "Timeline"], ["library", "Library"]].forEach(([v, l]) => {
       const d = document.createElement("div");
       d.textContent = l;
@@ -878,8 +1067,8 @@ class ChaoticDirectorEditor {
       });
       placeSeg.appendChild(d);
     });
-    placeRow.appendChild(placeSeg);
-    ins.appendChild(placeRow);
+    prevRow.appendChild(placeSeg);
+    grid.appendChild(prevRow);
 
     const kindRow = document.createElement("div");
     kindRow.className = "chaotic-row";
@@ -901,7 +1090,7 @@ class ChaoticDirectorEditor {
       lab.textContent = ref.kind === "video" ? "<Video N>" : "<Audio N>";
       kindRow.appendChild(lab);
     }
-    ins.appendChild(kindRow);
+    grid.appendChild(kindRow);
 
     if (ref.kind === "video") {
       const snd = document.createElement("div");
@@ -909,13 +1098,15 @@ class ChaoticDirectorEditor {
       const box = document.createElement("input");
       box.type = "checkbox";
       box.checked = ref.use_soundtrack;
+      box.title = "use this video's audio track as an <Audio N> reference for the soundtrack";
       box.addEventListener("change", () => { ref.use_soundtrack = box.checked; this.commitChanges(); this.buildInspector(); });
       const lab = document.createElement("span");
       lab.className = "chaotic-label";
-      lab.textContent = "Carry soundtrack as <Audio N>";
+      lab.title = "use this video's audio track as an <Audio N> reference for the soundtrack";
+      lab.textContent = "Soundtrack as <Audio N>";
       snd.appendChild(box);
       snd.appendChild(lab);
-      ins.appendChild(snd);
+      grid.appendChild(snd);
     }
 
     if (ref.kind === "video" || ref.kind === "audio") {
@@ -945,7 +1136,7 @@ class ChaoticDirectorEditor {
       endLab.textContent = "out";
       trim.appendChild(endLab);
       trim.appendChild(tout);
-      ins.appendChild(trim);
+      grid.appendChild(trim);
     }
 
     /* strength slider with retention band */
@@ -979,8 +1170,8 @@ class ChaoticDirectorEditor {
     strRow.appendChild(slider);
     strRow.appendChild(val);
     strRow.appendChild(band);
-    ins.appendChild(strRow);
-    ins.appendChild(this.hint(`Strength maps onto H3 retention_analysis: the label shown is what the Director will emit for this reference.`));
+    grid.appendChild(strRow);
+    grid.appendChild(this.hint(`Strength maps onto H3 retention_analysis: the label shown is what the Director will emit for this reference.`));
 
     if (ref.kind === "video") {
       const roleRow = document.createElement("div");
@@ -991,13 +1182,25 @@ class ChaoticDirectorEditor {
       [["reference", "Mood donor"], ["source", "Clip being edited"]].forEach(([v, l]) => {
         const d = document.createElement("div");
         d.textContent = l;
+        d.title = v === "source"
+          ? "this video IS the clip being edited — the edit target fed to the Video Edit node; shown with an EDIT badge"
+          : "reference only — used for mood/visual style, never treated as the edit target";
         d.className = ref.role === v ? "on" : "";
-        d.addEventListener("click", () => { ref.role = v; this.commitChanges(); this.buildInspector(); });
+        d.addEventListener("click", () => {
+          ref.role = v;
+          this.commitChanges();
+          this.buildInspector();
+          this.updateStatus(v === "source"
+            ? "Role: Clip being edited — this video is the edit target (EDIT badge on the timeline); its soundtrack can be carried as <Audio N>."
+            : "Role: Mood donor — this video is reference-only; not treated as the edit target.");
+        });
         seg.appendChild(d);
       });
       roleRow.appendChild(seg);
-      ins.appendChild(roleRow);
+      grid.appendChild(roleRow);
     }
+
+    ins.appendChild(grid);
 
     const annRow = document.createElement("div");
     annRow.className = "chaotic-row";
@@ -1258,14 +1461,23 @@ class ChaoticDirectorEditor {
     ctx.fillStyle = "#e8e8e8";
     ctx.font = "9px ui-monospace, Menlo, monospace";
     const tag = tags[ref.id] || (ref.kind === "subject" ? this.shorthands()[ref.id] : "");
-    const label = `${tag}${ref.name ? " · " + ref.name : ""}${ref.role === "source" ? " · [edit]" : ""}`;
+    const label = `${tag}${ref.name ? " · " + ref.name : ""}`;
     ctx.fillText(label.slice(0, 40), x0 + (x1 - x0 > 26 ? 40 : 4), y + 17);
+    /* visible EDIT badge so changing the role gives immediate feedback */
+    if (ref.role === "source") {
+      const bx = x0 + (x1 - x0 > 26 ? 40 : 4) + Math.min(ctx.measureText(label).width, 150) + 5;
+      ctx.fillStyle = "#7a3a1a";
+      ctx.fillRect(bx, y + 9, 25, 11);
+      ctx.fillStyle = "#ffb454";
+      ctx.font = "bold 7px ui-monospace, Menlo, monospace";
+      ctx.fillText("EDIT", bx + 2, y + 18);
+    }
 
     /* trim handles */
     if (x1 - x0 > 30) {
       ctx.fillStyle = "#c8c8c8";
-      ctx.fillRect(x0 + 1, y + 5, 3, h);
-      ctx.fillRect(x1 - 4, y + 5, 3, h);
+      ctx.fillRect(x0 + 1, y + 5, 5, h);
+      ctx.fillRect(x1 - 6, y + 5, 5, h);
     }
   }
 
@@ -1300,8 +1512,8 @@ class ChaoticDirectorEditor {
 
     /* duration handles */
     ctx.fillStyle = "#c8c8c8";
-    ctx.fillRect(x0 + 1, y + 5, 3, h);
-    ctx.fillRect(x1 - 4, y + 5, 3, h);
+    ctx.fillRect(x0 + 1, y + 5, 5, h);
+    ctx.fillRect(x1 - 6, y + 5, 5, h);
   }
 
   roundRect(ctx, x, y, w, h, r) {
@@ -1343,8 +1555,8 @@ class ChaoticDirectorEditor {
       if (y < ry || y > ry + TRACK_H) continue;
       const x0 = (ref.start / total) * w;
       const x1 = ((ref.start + ref.duration) / total) * w;
-      if (x >= x0 - 4 && x <= x0 + 4) return { type: "ref-left", id: ref.id };
-      if (x >= x1 - 4 && x <= x1 + 4) return { type: "ref-right", id: ref.id };
+      if (x >= x0 - HANDLE_HIT && x <= x0 + HANDLE_HIT) return { type: "ref-left", id: ref.id };
+      if (x >= x1 - HANDLE_HIT && x <= x1 + HANDLE_HIT) return { type: "ref-right", id: ref.id };
       if (x >= x0 && x <= x1) return { type: "ref", id: ref.id };
     }
     /* shots */
@@ -1353,8 +1565,8 @@ class ChaoticDirectorEditor {
       if (y < SHOT_TRACK_Y || y > SHOT_TRACK_Y + TRACK_H) continue;
       const x0 = (shot.start / total) * w;
       const x1 = ((shot.start + shot.duration) / total) * w;
-      if (x >= x0 - 4 && x <= x0 + 4) return { type: "shot-left", id: shot.id };
-      if (x >= x1 - 4 && x <= x1 + 4) return { type: "shot-right", id: shot.id };
+      if (x >= x0 - HANDLE_HIT && x <= x0 + HANDLE_HIT) return { type: "shot-left", id: shot.id };
+      if (x >= x1 - HANDLE_HIT && x <= x1 + HANDLE_HIT) return { type: "shot-right", id: shot.id };
       if (x >= x0 && x <= x1) return { type: "shot", id: shot.id };
     }
     return null;
@@ -1409,6 +1621,7 @@ class ChaoticDirectorEditor {
   }
 
   onMouseMove(e) {
+    this._lastClient = { x: e.clientX, y: e.clientY };
     if (!this._drag) return;
     const { x, y } = this.getMousePos(e);
     const total = this.duration * this.zoom;
@@ -1444,14 +1657,14 @@ class ChaoticDirectorEditor {
       const ref = this.refById(this._drag.id);
       if (!ref) return;
       if (this._drag.mode === "ref-move") {
-        ref.start = clamp(sec - ref.duration / 2, 0, total - ref.duration);
+        ref.start = this.snapTime(clamp(sec - ref.duration / 2, 0, total - ref.duration));
       } else if (this._drag.mode === "ref-left") {
-        const newStart = clamp(sec, 0, ref.start + ref.duration - MIN_DURATION);
+        const newStart = this.snapTime(clamp(sec, 0, ref.start + ref.duration - MIN_DURATION));
         ref.trim_start = Math.max(0, ref.trim_start + (newStart - ref.start));
         ref.duration = ref.duration - (newStart - ref.start);
         ref.start = newStart;
       } else if (this._drag.mode === "ref-right") {
-        const newEnd = clamp(sec, ref.start + MIN_DURATION, total);
+        const newEnd = this.snapTime(clamp(sec, ref.start + MIN_DURATION, total));
         ref.duration = newEnd - ref.start;
       }
       this.commitChanges();
@@ -1461,16 +1674,64 @@ class ChaoticDirectorEditor {
       const shot = this.shotById(this._drag.id);
       if (!shot) return;
       if (this._drag.mode === "shot-move") {
-        shot.start = clamp(sec - shot.duration / 2, 0, total - shot.duration);
+        let ns = this.snapTime(clamp(sec - shot.duration / 2, 0, total - shot.duration));
+        if (this.state.overlap_lock) ns = this.avoidShotOverlap(shot, ns);
+        shot.start = ns;
       } else if (this._drag.mode === "shot-left") {
-        const newStart = clamp(sec, 0, shot.start + shot.duration - MIN_DURATION);
+        let newStart = this.snapTime(clamp(sec, 0, shot.start + shot.duration - MIN_DURATION));
+        if (this.state.overlap_lock) newStart = this.avoidShotOverlap(shot, newStart);
         shot.duration = shot.duration - (newStart - shot.start);
         shot.start = newStart;
       } else if (this._drag.mode === "shot-right") {
-        shot.duration = clamp(sec - shot.start, MIN_DURATION, total - shot.start);
+        const newEnd = this.snapTime(clamp(sec, shot.start + MIN_DURATION, total));
+        if (this.state.overlap_lock) {
+          /* don't let the right edge push into the next shot */
+          const nxt = this.state.shots
+            .filter(s => s.id !== shot.id && s.start >= shot.start - 1e-6)
+            .sort((a, b) => a.start - b.start)[0];
+          const maxEnd = nxt ? Math.max(shot.start + MIN_DURATION, nxt.start) : total;
+          shot.duration = clamp(newEnd, MIN_DURATION, maxEnd) - shot.start;
+        } else {
+          shot.duration = clamp(newEnd, MIN_DURATION, total) - shot.start;
+        }
       }
       this.commitChanges();
     }
+  }
+
+  snapTime(sec) {
+    if (!this.state.snap || !this.state.snap.on) return sec;
+    const unit = this.state.snap.unit === "second" ? 1 : (1 / (this.fps || 24));
+    return Math.round(sec / unit) * unit;
+  }
+
+  avoidShotOverlap(shot, targetStart) {
+    /* with overlap-lock on, slide the target to the nearest free gap */
+    const dur = shot.duration;
+    const others = this.state.shots.filter(s => s.id !== shot.id).sort((a, b) => a.start - b.start);
+    const totalEnd = this.duration;
+    const maxStart = Math.max(0, totalEnd - dur);
+    let target = clamp(targetStart, 0, maxStart);
+    for (let guard = 0; guard < 24; guard++) {
+      let bad = null;
+      for (const o of others) {
+        if (target < o.start + o.duration - 1e-6 && target + dur > o.start + 1e-6) { bad = o; break; }
+      }
+      if (!bad) break;
+      const before = bad.start - dur;
+      const after = bad.start + bad.duration;
+      if (target + dur / 2 <= bad.start + bad.duration / 2) target = Math.max(0, before);
+      else target = Math.min(maxStart, after);
+    }
+    /* final pass: if a tight layout still overlaps, settle on the nearest free edge */
+    for (const o of others) {
+      if (target < o.start + o.duration - 1e-6 && target + dur > o.start + 1e-6) {
+        const before = Math.max(0, o.start - dur);
+        const after = Math.min(maxStart, o.start + o.duration);
+        target = (Math.abs(target - before) <= Math.abs(target - after)) ? before : after;
+      }
+    }
+    return clamp(target, 0, maxStart);
   }
 
   snapToBoundary(sec) {
@@ -1486,20 +1747,226 @@ class ChaoticDirectorEditor {
     return clamp(Math.round(best * 20) / 20, 0.05, this.duration - 0.05);
   }
 
-  onMouseUp() { this._drag = null; }
+  onMouseUp(e) {
+    const drag = this._drag;
+    this._drag = null;
+    if (!drag) return;
+    /* drag a timeline ref onto the open library panel → move it to the library */
+    if (drag.mode === "ref-move" && this.libraryPanel && this.libraryPanel.classList.contains("open")) {
+      const pt = this._lastClient || { x: e.clientX, y: e.clientY };
+      const el = document.elementFromPoint(pt.x, pt.y);
+      if (el && this.libraryPanel.contains(el)) {
+        const ref = this.refById(drag.id);
+        if (ref) {
+          ref.timed = false;
+          this.commitChanges();
+          this.buildInspector();
+          this.updateStatus("Reference moved to the library — it no longer appears on the timeline.");
+        }
+        return;
+      }
+    }
+  }
 
   onDblClick(e) {
     const { x, y } = this.getMousePos(e);
+    const hit = this.hitTest(x, y);
+    /* double-clicking an existing shot/ref opens it instead of overlapping it */
+    if (hit && (hit.type === "shot" || hit.type === "ref" || hit.type.startsWith("shot") || hit.type.startsWith("ref"))) {
+      this.selectedType = hit.type.startsWith("shot") ? "shot" : "ref";
+      this.selectedId = hit.id;
+      this.buildInspector();
+      this.renderTimeline();
+      return;
+    }
     const track = this.trackForY(y);
     if (track === "shot") {
-      const sec = this.secondsAt(x);
-      const shot = this.normalizeShot({ id: uid("shot"), start: Math.max(0, sec - 1), duration: 2, text: "[Shot N] New shot." }, this.state.shots.length);
+      const sec = this.snapTime(this.secondsAt(x));
+      const dur = this.snapTime(2);
+      const shot = this.normalizeShot({ id: uid("shot"), start: Math.max(0, sec - dur / 2), duration: dur, text: "[Shot N] New shot." }, this.state.shots.length);
+      if (this.state.overlap_lock) {
+        shot.start = this.avoidShotOverlap(shot, shot.start);
+      }
       this.state.shots.push(shot);
       this.selectedType = "shot";
       this.selectedId = shot.id;
       this.commitChanges();
       this.buildInspector();
     }
+  }
+
+  /* ---------------- keyboard ---------------- */
+  onKeyDown(e) {
+    const t = e.target;
+    if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || (t.isContentEditable))) return;
+    if (e.key === "Delete" || e.key === "Backspace") {
+      if (this.selectedType === "shot" && this.selectedId) {
+        e.preventDefault();
+        this.deleteShot(this.selectedId);
+      } else if (this.selectedType === "ref" && this.selectedId) {
+        e.preventDefault();
+        this.deleteRef(this.selectedId);
+      }
+    } else if (e.key === "Escape") {
+      this.closeContextMenu();
+      this.closeTagMenu();
+      if (this.selectedId) {
+        this.selectedId = null;
+        this.selectedType = null;
+        this.buildInspector();
+        this.renderTimeline();
+      }
+    }
+  }
+
+  /* ---------------- right-click context menu ---------------- */
+  onContextMenu(e) {
+    e.preventDefault();
+    const { x, y } = this.getMousePos(e);
+    const hit = this.hitTest(x, y);
+    const items = [];
+    if (hit && hit.type.startsWith("shot")) {
+      const shot = this.shotById(hit.id);
+      if (shot) {
+        this.selectedType = "shot";
+        this.selectedId = shot.id;
+        this.renderTimeline();
+        this.buildInspector();
+        items.push({ label: "✂ Split at playhead", fn: () => this.splitShot(shot.id) });
+        items.push({ label: "⧉ Duplicate", fn: () => this.duplicateShot(shot.id) });
+        items.push({ sep: true });
+        items.push({ label: "🗑 Delete shot", danger: true, fn: () => this.deleteShot(shot.id) });
+      }
+    } else if (hit && hit.type.startsWith("ref")) {
+      const ref = this.refById(hit.id);
+      if (ref) {
+        this.selectedType = "ref";
+        this.selectedId = ref.id;
+        this.renderTimeline();
+        this.buildInspector();
+        items.push({ label: "▶ Preview", fn: () => this.previewRef(ref.id) });
+        items.push({ label: ref.timed ? "📥 Move to library" : "📌 Place on timeline", fn: () => ref.timed ? this.moveRefToLibrary(ref.id) : this.placeRefOnTimeline(ref.id) });
+        items.push({ label: ref.role === "source" ? "🎭 Role: Mood donor" : "🎬 Role: Clip being edited", fn: () => { ref.role = ref.role === "source" ? "reference" : "source"; this.commitChanges(); this.buildInspector(); } });
+        items.push({ sep: true });
+        items.push({ label: "🗑 Delete reference", danger: true, fn: () => this.deleteRef(ref.id) });
+      }
+    } else {
+      /* empty space: import + grab from library */
+      const track = this.trackForY(y);
+      items.push({ sub: "Import → " + (track ? track.toUpperCase() : "TIMELINE") });
+      [["picture", "Picture"], ["video", "Video"], ["audio", "Audio"]].forEach(([k, l]) => {
+        items.push({ label: "⬆ " + l + "…", fn: () => this.pickFiles(k) });
+      });
+      const lib = this.state.refs.filter(r => !r.timed);
+      if (lib.length) {
+        items.push({ sep: true });
+        items.push({ sub: "Grab from library (at this time)" });
+        lib.forEach(r => {
+          const tag = this.globalTags()[r.id] || (r.name || r.file || r.kind);
+          items.push({
+            label: "🧷 " + tag,
+            fn: () => { const sec = Math.max(0, this.secondsAt(x)); this.placeRefOnTimeline(r.id, sec); },
+          });
+        });
+      }
+      const shotsAt = this.state.shots.filter(s => y >= SHOT_TRACK_Y && y <= SHOT_TRACK_Y + TRACK_H);
+      if (shotsAt.length) {
+        items.push({ sep: true });
+        items.push({ label: "✂ Split nearest shot here", fn: () => {
+          const sec = this.snapTime(this.secondsAt(x));
+          const near = this.state.shots
+            .map(s => ({ s, d: Math.min(Math.abs(sec - s.start), Math.abs(sec - (s.start + s.duration))) }))
+            .sort((a, b) => a.d - b.d)[0];
+          if (near && near.s) { this.playhead = sec; this.splitShot(near.s.id); }
+        } });
+      }
+    }
+    this.openContextMenu(items, e.clientX, e.clientY);
+  }
+
+  openContextMenu(items, x, y) {
+    this.closeContextMenu();
+    const m = document.createElement("div");
+    m.className = "chaotic-ctx";
+    items.forEach(it => {
+      if (it.sep) {
+        const s = document.createElement("div");
+        s.className = "chaotic-ctx-sep";
+        m.appendChild(s);
+        return;
+      }
+      if (it.sub) {
+        const s = document.createElement("div");
+        s.className = "chaotic-ctx-sub";
+        s.textContent = it.sub;
+        m.appendChild(s);
+        return;
+      }
+      const d = document.createElement("div");
+      d.className = "chaotic-ctx-item" + (it.danger ? " danger" : "");
+      d.textContent = it.label;
+      d.addEventListener("click", () => { this.closeContextMenu(); it.fn(); });
+      m.appendChild(d);
+    });
+    document.body.appendChild(m);
+    m.style.display = "block";
+    const r = m.getBoundingClientRect();
+    m.style.left = Math.max(4, Math.min(x, window.innerWidth - r.width - 8)) + "px";
+    m.style.top = Math.max(4, Math.min(y, window.innerHeight - r.height - 8)) + "px";
+    this._ctxMenu = m;
+    setTimeout(() => {
+      this._ctxClose = ev => { if (this._ctxMenu && !this._ctxMenu.contains(ev.target)) this.closeContextMenu(); };
+      document.addEventListener("mousedown", this._ctxClose);
+    }, 0);
+  }
+
+  closeContextMenu() {
+    if (this._ctxMenu) { this._ctxMenu.remove(); this._ctxMenu = null; }
+    if (this._ctxClose) { document.removeEventListener("mousedown", this._ctxClose); this._ctxClose = null; }
+  }
+
+  deleteShot(id) {
+    this.state.shots = this.state.shots.filter(s => s.id !== id);
+    if (this.selectedId === id) { this.selectedId = null; this.selectedType = null; }
+    this.commitChanges();
+    this.buildInspector();
+  }
+
+  deleteRef(id) {
+    this.state.refs = this.state.refs.filter(r => r.id !== id);
+    if (this.selectedId === id) { this.selectedId = null; this.selectedType = null; }
+    this.commitChanges();
+    this.buildInspector();
+  }
+
+  splitShot(id) {
+    const shot = this.shotById(id);
+    if (!shot) return;
+    const at = this.snapTime(this.playhead != null ? this.playhead : shot.start);
+    if (at <= shot.start + MIN_DURATION || at >= shot.start + shot.duration - MIN_DURATION) {
+      this.updateStatus("Move the playhead inside the shot first, then split.");
+      return;
+    }
+    const b = this.normalizeShot({ id: uid("shot"), start: at, duration: shot.start + shot.duration - at, text: shot.text, format: shot.format }, this.state.shots.length);
+    shot.duration = at - shot.start;
+    this.state.shots.push(b);
+    this.commitChanges();
+    this.renderTimeline();
+    this.updateStatus("Shot split at " + at.toFixed(2) + "s — both halves keep the same prompt.");
+  }
+
+  duplicateShot(id) {
+    const shot = this.shotById(id);
+    if (!shot) return;
+    let start = shot.start + shot.duration;
+    if (this.state.overlap_lock) start = this.avoidShotOverlap({ id: uid("shot"), duration: shot.duration }, start);
+    const copy = this.normalizeShot({ id: uid("shot"), start, duration: shot.duration, text: shot.text, format: shot.format }, this.state.shots.length);
+    this.state.shots.push(copy);
+    this.selectedType = "shot";
+    this.selectedId = copy.id;
+    this.commitChanges();
+    this.buildInspector();
+    this.updateStatus("Shot duplicated.");
   }
 
   /* ---------------- file import ---------------- */
@@ -1674,7 +2141,8 @@ class ChaoticDirectorEditor {
   addShot() {
     let start = 0;
     this.state.shots.forEach(s => { start = Math.max(start, s.start + s.duration); });
-    const shot = this.normalizeShot({ id: uid("shot"), start, duration: 3, text: "[Shot N] Describe the shot...", format: "auto" }, this.state.shots.length);
+    start = this.snapTime(start);
+    const shot = this.normalizeShot({ id: uid("shot"), start, duration: this.snapTime(3), text: "[Shot N] Describe the shot...", format: "auto" }, this.state.shots.length);
     this.state.shots.push(shot);
     this.selectedType = "shot";
     this.selectedId = shot.id;
@@ -1791,8 +2259,15 @@ class ChaoticDirectorEditor {
       card.draggable = true;
       card.title = "Drag onto the timeline to place it, or use Place ▸";
       card.addEventListener("dragstart", e => {
+        if (e.target && e.target.classList && (e.target.classList.contains("chaotic-lib-strength") || e.target.classList.contains("chaotic-btn"))) {
+          e.preventDefault();   /* dragging the slider/buttons must not drag the card */
+          return;
+        }
         e.dataTransfer.setData("text/chaotic-lib", ref.id);
         e.dataTransfer.effectAllowed = "move";
+      });
+      card.addEventListener("mousedown", e => {
+        if (e.target && e.target.classList && e.target.classList.contains("chaotic-lib-strength")) e.stopPropagation();
       });
       let thumb;
       if (ref.kind === "audio") {
@@ -1879,7 +2354,7 @@ class ChaoticDirectorEditor {
   placeRefOnTimeline(id, start) {
     const ref = this.refById(id);
     if (!ref) return;
-    const s = start != null ? Math.max(0, start) : (this.playhead != null ? Math.max(0, this.playhead) : 0);
+    const s = this.snapTime(start != null ? Math.max(0, start) : (this.playhead != null ? Math.max(0, this.playhead) : 0));
     ref.timed = true;
     ref.start = Math.max(0, Math.min(s, Math.max(0, this.duration - 0.5)));
     ref.duration = Math.max(ref.duration, 3);
@@ -1925,7 +2400,7 @@ class ChaoticDirectorEditor {
     this.previewStage = document.createElement("div");
     this.previewStage.className = "chaotic-preview-stage";
     this.previewVideo = document.createElement("video");
-    this.previewVideo.muted = true;
+    this.previewVideo.muted = false;   /* preview should play audio — toggle available via 🔊 */
     this.previewVideo.playsInline = true;
     this.previewVideo.preload = "auto";
     this.previewVideo.style.display = "none";
@@ -1938,6 +2413,7 @@ class ChaoticDirectorEditor {
     this.previewWave = document.createElement("canvas");
     this.previewWave.className = "chaotic-preview-wave";
     this.previewAudio = document.createElement("audio");
+    this.previewAudio.preload = "auto";
     this.previewAudio.addEventListener("timeupdate", () => this.onPreviewAudioTime());
     this.previewAudio.addEventListener("play", () => this.previewPlayBtn.classList.add("playing"));
     this.previewAudio.addEventListener("pause", () => this.previewPlayBtn.classList.remove("playing"));
@@ -1945,6 +2421,7 @@ class ChaoticDirectorEditor {
     this.previewStage.appendChild(this.previewVideo);
     this.previewStage.appendChild(this.previewImg);
     this.previewStage.appendChild(this.previewWave);
+    this.previewStage.appendChild(this.previewAudio);
     this.previewStage.appendChild(this.previewHint);
     this.previewPanel.appendChild(this.previewStage);
 
@@ -1966,9 +2443,12 @@ class ChaoticDirectorEditor {
     this.previewTime.textContent = "--:--.--- / --:--.---";
     const copyRefBtn = this.btn("⧉ Copy to ref", () => this.copyPreviewToReference());
     copyRefBtn.title = "copy the preview frame at the playhead into the reference library";
+    this.previewMuteBtn = this.btn("🔊", () => this.togglePreviewMute());
+    this.previewMuteBtn.title = "mute / unmute the preview audio";
     controls.appendChild(this.previewPlayBtn);
     controls.appendChild(this.previewSeek);
     controls.appendChild(this.previewTime);
+    controls.appendChild(this.previewMuteBtn);
     controls.appendChild(copyRefBtn);
     this.previewPanel.appendChild(controls);
 
@@ -2289,43 +2769,74 @@ class ChaoticDirectorEditor {
       } else {
         this.previewAudio.pause();
       }
+    } else {
+      this.updateStatus("Stills have no audio — scrub to a video or audio ref to play.");
     }
+  }
+
+  togglePreviewMute() {
+    const m = this.previewVideo.muted;
+    this.previewVideo.muted = !m;
+    this.previewAudio.muted = !m;
+    this.previewMuteBtn.textContent = m ? "🔊" : "🔇";
+    this.previewMuteBtn.title = m ? "mute / unmute the preview audio" : "preview audio muted";
   }
 
   previewRef(id) {
     const ref = this.refById(id);
     if (!ref) return;
-    if (ref.timed) {
-      this.setPlayhead(ref.start + 0.05);
-    } else if (ref.kind === "audio") {
-      /* library audio: preview standalone */
+    this.previewHint.style.display = "none";
+    const label = (this.globalTags()[ref.id] || "") + " · " + (ref.name || ref.file || "");
+    if (ref.kind === "picture" || ref.kind === "subject") {
+      /* still: show it, no play */
       this._previewRefId = ref.id;
-      this.previewHint.style.display = "none";
-      this.previewImg.style.display = "none";
+      this.previewVideo.pause();
+      this.previewAudio.pause();
+      this.previewVideo.style.display = "none";
+      this.previewWave.style.display = "none";
+      this.previewImg.style.display = "block";
+      this.previewImg.src = ref.thumb || this.viewUrl(ref.file);
+      this.previewLabel.textContent = label;
+      this.previewTime.textContent = "still frame";
+      this.previewSeek.max = "0";
+      this.previewSeek.value = "0";
+      this.updateStatus("Picture preview — scrub to a video/audio ref to hear sound.");
+      return;
+    }
+    if (ref.timed) {
+      /* jump the playhead to the ref and start playing */
+      this.setPlayhead(ref.start + 0.05);
+      this.togglePreviewPlay();
+      return;
+    }
+    /* library video / audio: load it standalone and PLAY */
+    this._previewRefId = ref.id;
+    this.previewImg.style.display = "none";
+    this.previewLabel.textContent = label;
+    const url = this.viewUrl(ref.file);
+    if (ref.kind === "audio") {
+      this.previewVideo.pause();
       this.previewVideo.style.display = "none";
       this.previewWave.style.display = "block";
       this.previewWave.width = 360;
-      this.previewWave.height = 80;
+      this.previewWave.height = 100;
       this.drawWaveform(this.previewWave, ref.peaks || this.fakePeaks());
-      const url = this.viewUrl(ref.file);
       if (url) { this.previewAudio.src = url; this.previewAudio.load(); }
-      const tags = this.globalTags();
-      this.previewLabel.textContent = (tags[ref.id] || "") + " · " + (ref.name || ref.file || "");
+      const play = () => this.previewAudio.play().catch(() => {});
+      if (this.previewAudio.readyState >= 1) play();
+      else this.previewAudio.addEventListener("loadeddata", play, { once: true });
     } else {
-      /* library video: preview standalone from its trim window */
-      this._previewRefId = ref.id;
-      this.previewHint.style.display = "none";
-      this.previewImg.style.display = "none";
       this.previewWave.style.display = "none";
       this.previewVideo.style.display = "block";
-      const url = this.viewUrl(ref.file);
       if (url) {
         this.previewVideo.src = url;
         this.previewVideo.load();
       }
-      const tags = this.globalTags();
-      this.previewLabel.textContent = (tags[ref.id] || "") + " · " + (ref.name || ref.file || "");
+      const play = () => this.previewVideo.play().catch(() => {});
+      if (this.previewVideo.readyState >= 1) play();
+      else this.previewVideo.addEventListener("loadeddata", play, { once: true });
     }
+    this.updateStatus("Previewing the library reference — press ▶ to replay.");
   }
 
   /* ---------------- playhead + render window ---------------- */
@@ -2488,7 +2999,7 @@ app.registerExtension({
       const self = this;
       widget.computeSize = function () {
         const width = Math.max(700, (self.size && self.size[0]) || 1100);
-        const inspectorH = self._chaoticEditor && self._chaoticEditor.inspector.style.display !== "none" ? 300 : 0;
+        const inspectorH = self._chaoticEditor && self._chaoticEditor.inspector.classList.contains("open") ? 330 : 0;
         const projectH = self._chaoticEditor && self._chaoticEditor.projectPanel.classList.contains("open") ? 560 : 36;
         const libraryH = self._chaoticEditor && self._chaoticEditor.libraryPanel && self._chaoticEditor.libraryPanel.classList.contains("open")
           ? 180 : 40;

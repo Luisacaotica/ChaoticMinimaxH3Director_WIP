@@ -453,10 +453,14 @@ class ChaoticVideoEdit {
     const btnLoadP = this.btn("Load", () => this.loadProject());
     const btnPlay = this.btn("▶", () => this.togglePlay());
     this.playBtn = btnPlay;
+    btnPlay.title = "play/pause the preview (with audio)";
+    const btnMute = this.btn("🔊", () => this.toggleMute());
+    btnMute.title = "mute / unmute the preview audio";
+    this.muteBtn = btnMute;
     const btnRef = this.btn("⧉ Copy to ref", () => this.copyToReference());
     btnRef.title = "copy the rectangle selection as a reference image (ref_images output)";
     this.refBtn = btnRef;
-    toolbar.append(btnLoad, btnMode, btnPlay, btnSave, btnLoadP, btnRef);
+    toolbar.append(btnLoad, btnMode, btnPlay, btnMute, btnSave, btnLoadP, btnRef);
     this.wrapper.appendChild(toolbar);
 
     /* framerate row: the node's fps widget is the fixed latent rate — keep it
@@ -727,6 +731,10 @@ class ChaoticVideoEdit {
     simRow.appendChild(this.btnL("Spill"));
     simRow.appendChild(this.slider("spill", 0, 0.9, 0.01));
     this.chromaPanel.appendChild(simRow);
+    const chromaHint = document.createElement("div");
+    chromaHint.className = "ve-hint";
+    chromaHint.innerHTML = "How to use: <b>①</b> press <b>Sample</b> (or click the preview / <b>Detect</b> for auto) to pick the backing color — green, blue or any screen · <b>②</b> drag <b>Similarity + Smooth</b> until the subject looks clean on the checkerboard · <b>③</b> the <b>checkerboard = transparency</b>: the keyed foreground plate composites over any background (place it in the Director / Mockup). <b>Spill</b> removes color bleed. The plate output is the cut-out ready to composite — no inpainting needed here.";
+    this.chromaPanel.appendChild(chromaHint);
     this.wrapper.appendChild(this.chromaPanel);
 
     /* reframe panel */
@@ -938,6 +946,12 @@ class ChaoticVideoEdit {
     /* interactions */
     this.canvas.addEventListener("mousedown", e => this.onCanvasDown(e));
     this.canvas.addEventListener("mousemove", e => this.onCanvasMove(e));
+    this.canvas.addEventListener("dblclick", e => this.onCanvasDbl(e));
+    this.canvas.addEventListener("contextmenu", e => {
+      e.preventDefault();
+      if (!this.videoEl || !this.videoEl.src) this.pickVideo();
+      else this.updateStatus("Right-click: video loaded. Double-click the canvas to play/pause. Draw with Brush/Rect → Set Mask Key.");
+    });
     document.addEventListener("mouseup", () => this.onCanvasUp());
     this.keyCanvas.addEventListener("mousedown", e => this.onKeyStripDown(e));
     this.wrapper.addEventListener("dragover", e => { e.preventDefault(); e.stopPropagation(); });
@@ -948,9 +962,11 @@ class ChaoticVideoEdit {
     this.wrapper.appendChild(this.fileInput);
 
     this.videoEl = document.createElement("video");
-    this.videoEl.muted = true;
+    this.videoEl.muted = false;   /* audible scrub + playback */
     this.videoEl.playsInline = true;
     this.videoEl.preload = "auto";
+    this.videoEl.style.cssText = "position:absolute;left:0;top:0;width:100%;height:100%;opacity:0;pointer-events:none;";
+    if (this.previewBox) this.previewBox.appendChild(this.videoEl);
     this.videoEl.addEventListener("loadedmetadata", () => this.onVideoMeta());
     this.videoEl.addEventListener("timeupdate", () => { if (!this.playing) this.setPlayhead(this.videoEl.currentTime); });
 
@@ -1101,6 +1117,22 @@ class ChaoticVideoEdit {
     } else {
       this.videoEl.pause();
     }
+  }
+
+  toggleMute() {
+    this.videoEl.muted = !this.videoEl.muted;
+    this.muteBtn.textContent = this.videoEl.muted ? "🔇" : "🔊";
+    this.muteBtn.title = this.videoEl.muted ? "preview audio muted" : "mute / unmute the preview audio";
+    this.updateStatus(this.videoEl.muted ? "Preview audio muted." : "Preview audio on — scrub and press ▶ to hear the clip.");
+  }
+
+  onCanvasDbl(e) {
+    /* double-click inserts a video; with one loaded it plays/pauses */
+    if (!this.videoEl || !this.videoEl.src) {
+      this.pickVideo();
+      return;
+    }
+    this.togglePlay();
   }
 
   setPlayhead(t) {
@@ -1560,8 +1592,7 @@ class ChaoticVideoEdit {
     const [W, H] = this.canvasSize();
     const ctx = this.ctx;
     ctx.clearRect(0, 0, W, H);
-    ctx.fillStyle = "#101214";
-    ctx.fillRect(0, 0, W, H);
+    this.drawStagePattern(ctx, W, H);   /* checkerboard stage — no dead black bars */
     const hasVideo = this.videoEl && this.videoEl.src && this.videoEl.readyState >= 1;
     if (hasVideo) {
       const vw = this.videoEl.videoWidth || W, vh = this.videoEl.videoHeight || H;
@@ -1644,6 +1675,19 @@ class ChaoticVideoEdit {
     try { this.ctx.putImageData(img, 0, 0); } catch (e) {}
   }
 
+  drawStagePattern(ctx, W, H) {
+    /* subtle checkerboard so letterbox areas read as "empty stage", not a bar */
+    ctx.fillStyle = "#16181b";
+    ctx.fillRect(0, 0, W, H);
+    const cell = 14;
+    ctx.fillStyle = "#1c1f23";
+    for (let y = 0; y < H; y += cell) {
+      for (let x = (Math.floor(y / cell) % 2) * cell; x < W; x += cell * 2) {
+        ctx.fillRect(x, y, cell, cell);
+      }
+    }
+  }
+
   drawChromaPreview(W, H) {
     try {
       const img = this.ctx.getImageData(0, 0, W, H);
@@ -1652,7 +1696,7 @@ class ChaoticVideoEdit {
       const sim = this.state.chroma.similarity, sm = this.state.chroma.smooth;
       const spill = this.state.chroma.spill;
       const low = Math.max(1e-6, sim - sm), high = sim + sm;
-      const cell = 16;
+      const cell = 8;
       for (let i = 0; i < W * H; i++) {
         const pr = d[i * 4] / 255, pg = d[i * 4 + 1] / 255, pb = d[i * 4 + 2] / 255;
         const dist = Math.sqrt((pr - r) ** 2 + (pg - g) ** 2 + (pb - b) ** 2);
@@ -2179,12 +2223,33 @@ class ChaoticVideoEdit {
     const w = this.reframeWindow(W, H);
     const ctx = this.ctx;
     ctx.save();
-    /* dim the outpaint region (outside the target window) */
-    ctx.fillStyle = "rgba(8,10,12,0.72)";
+    /* dim the outpaint region (outside the target window) — light, hatched,
+       so the video stays visible and it reads as "to be generated" */
+    ctx.fillStyle = "rgba(8,10,12,0.42)";
     ctx.fillRect(0, 0, W, w.wy);
     ctx.fillRect(0, w.wy + w.wh, W, H - w.wy - w.wh);
     ctx.fillRect(0, w.wy, w.wx, w.wh);
     ctx.fillRect(w.wx + w.ww, w.wy, W - w.wx - w.ww, w.wh);
+    ctx.save();
+    ctx.strokeStyle = "rgba(255,255,255,0.06)";
+    ctx.lineWidth = 1;
+    const hatch = (hx0, hy0, hw, hh) => {
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(hx0, hy0, hw, hh);
+      ctx.clip();
+      for (let hx = -hh; hx < hw + hh; hx += 12) {
+        ctx.beginPath();
+        ctx.moveTo(hx0 + hx, hy0);
+        ctx.lineTo(hx0 + hx + hh, hy0 + hh);
+        ctx.stroke();
+      }
+      ctx.restore();
+    };
+    hatch(0, 0, W, w.wy);
+    hatch(0, w.wy + w.wh, W, H - w.wy - w.wh);
+    hatch(0, w.wy, w.wx, w.wh);
+    hatch(w.wx + w.ww, w.wy, W - w.wx - w.ww, w.wh);
     /* source video placed inside the window, rotated around its center */
     if (this.videoEl && this.videoEl.src && this.videoEl.readyState >= 1) {
       ctx.save();
