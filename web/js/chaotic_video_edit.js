@@ -229,6 +229,8 @@ class ChaoticVideoEdit {
     this._tool = "brush";
     this._drawing = false;
     this._rectAnchor = null;
+    this._rfTool = "brush";   // reframe tool: brush (preserve) | move (window)
+    this._dragWin = null;     // active window drag state
     this._workMask = null;        // Uint8ClampedArray grid, 255 = masked
     this._gridW = 0; this._gridH = 0;
     this._lastWidth = 0; this._lastScale = 0;
@@ -640,6 +642,20 @@ class ChaoticVideoEdit {
     rfTitle.className = "ve-panel-title";
     rfTitle.innerHTML = "<span>Reframe (outpaint outside)</span>";
     this.reframePanel.appendChild(rfTitle);
+
+    /* tools: brush strokes preserve; move drags the source window anywhere */
+    const rfToolRow = document.createElement("div");
+    rfToolRow.className = "ve-row";
+    rfToolRow.appendChild(this.btnL("Tool"));
+    const brushBtn = this.btn("Brush (preserve)", () => this.setRfTool("brush"));
+    brushBtn.title = "paint strokes = preserve regions (people/objects crossing the edge)";
+    const moveBtn = this.btn("✥ Move window", () => this.setRfTool("move"));
+    moveBtn.title = "drag the source window anywhere inside the target";
+    brushBtn.className = "ve-btn active";
+    this.rfToolBtns = { brush: brushBtn, move: moveBtn };
+    rfToolRow.appendChild(brushBtn);
+    rfToolRow.appendChild(moveBtn);
+    this.reframePanel.appendChild(rfToolRow);
 
     const aspectRow = document.createElement("div");
     aspectRow.className = "ve-row";
@@ -1215,7 +1231,11 @@ class ChaoticVideoEdit {
   }
 
   onCanvasDown(e) {
-    if (this.state.mode !== "inpaint") return;
+    if (this.state.mode === "reframe" && this._rfTool === "move") {
+      this.startWindowDrag(e);
+      return;
+    }
+    if (this.state.mode === "chroma") return;
     const p = this.mouseToNorm(e);
     this.ensureGrid();
     /* seed the work mask from the interpolated mask so drawing refines it */
@@ -1233,6 +1253,7 @@ class ChaoticVideoEdit {
   }
 
   onCanvasMove(e) {
+    if (this._dragWin) { this.moveWindowDrag(e); return; }
     if (!this._drawing) return;
     const p = this.mouseToNorm(e);
     this._lastNorm = p;
@@ -1250,6 +1271,7 @@ class ChaoticVideoEdit {
   }
 
   onCanvasUp() {
+    if (this._dragWin) { this._dragWin = null; this.endWindowDrag(); return; }
     if (!this._drawing) return;
     if (this._tool === "rect" && this._rectAnchor && this._lastNorm) {
       this.fillRectFromAnchor();
@@ -1311,7 +1333,7 @@ class ChaoticVideoEdit {
       const dw = vw * s, dh = vh * s;
       const dx = (W - dw) / 2, dy = (H - dh) / 2;
       ctx.drawImage(this.videoEl, dx, dy, dw, dh);
-      this.drawSelectionOverlay(W, H);
+      if (this.state.mode !== "reframe") this.drawSelectionOverlay(W, H);
     } else {
       ctx.fillStyle = "#333";
       ctx.font = "11px ui-monospace, monospace";
@@ -1324,7 +1346,10 @@ class ChaoticVideoEdit {
       this.drawChromaPreview(W, H);
       return;
     }
-    if (this.state.mode === "reframe") this.drawReframeFraming(W, H);
+    if (this.state.mode === "reframe") {
+      this.drawReframeFraming(W, H);
+      this.drawSelectionOverlay(W, H);  // after the window repaint so it stays visible
+    }
     /* mask overlay (red) from the interpolated grid — mapped through the same
        placement the render uses (the reframe window, or the canvas-centered
        contain-fit otherwise) so strokes sit on the video */
@@ -1534,6 +1559,9 @@ class ChaoticVideoEdit {
       : this.state.mode === "chroma"
         ? "green screen — transparent shows the checkerboard"
         : "reframe — dimmed outside the target window gets outpainted";
+    if (this.canvas) {
+      this.canvas.style.cursor = this.state.mode === "reframe" && this._rfTool === "move" ? "move" : "crosshair";
+    }
   }
 
   setTool(t) { this._tool = t; this.refreshToggleStates(); }
@@ -1562,6 +1590,44 @@ class ChaoticVideoEdit {
       Object.keys(this.alignBtns.align_x).forEach(k => this.alignBtns.align_x[k].classList.toggle("active", Number(k) === rf.align_x));
       Object.keys(this.alignBtns.align_y).forEach(k => this.alignBtns.align_y[k].classList.toggle("active", Number(k) === rf.align_y));
     }
+  }
+
+  setRfTool(t) {
+    this._rfTool = t;
+    if (this.rfToolBtns) {
+      Object.keys(this.rfToolBtns).forEach(k => this.rfToolBtns[k].classList.toggle("active", k === t));
+    }
+    if (this.canvas) this.canvas.style.cursor = t === "move" ? "move" : "crosshair";
+  }
+
+  startWindowDrag(e) {
+    const [W, H] = this.canvasSize();
+    const w = this.reframeWindow(W, H);
+    const rect = this.canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    this._dragWin = { grabDX: mx - w.sx, grabDY: my - w.sy, wx: w.wx, wy: w.wy, ww: w.ww, wh: w.wh, sw: w.sw, sh: w.sh };
+  }
+
+  moveWindowDrag(e) {
+    if (!this._dragWin) return;
+    const rect = this.canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const d = this._dragWin;
+    const rf = this.state.reframe;
+    /* only write an axis that actually has travel — a contain-fit source fills
+       one axis, and writing there would scribble meaningless fractions */
+    const availW = d.ww - d.sw;
+    const availH = d.wh - d.sh;
+    if (availW > 1) rf.align_x = veClamp((mx - d.grabDX - d.wx) / availW, 0, 1);
+    if (availH > 1) rf.align_y = veClamp((my - d.grabDY - d.wy) / availH, 0, 1);
+    this.drawPreview();
+  }
+
+  endWindowDrag() {
+    this.refreshReframeUI();
+    this.commitChanges();
   }
 
   /* reframe target window in preview coords (mirrors reframe_plate: contain + align) */
@@ -1610,14 +1676,21 @@ class ChaoticVideoEdit {
 
   drawSelectionOverlay(W, H) {
     if (!this._selRect) return;
-    const vw = (this.videoEl && this.videoEl.videoWidth) || W;
-    const vh = (this.videoEl && this.videoEl.videoHeight) || H;
-    const s = Math.min(W / vw, H / vh);
-    const ox = (W - vw * s) / 2, oy = (H - vh * s) / 2;
-    const x0 = ox + this._selRect.x0 * vw * s;
-    const y0 = oy + this._selRect.y0 * vh * s;
-    const w = (this._selRect.x1 - this._selRect.x0) * vw * s;
-    const h = (this._selRect.y1 - this._selRect.y0) * vh * s;
+    let ox, oy, pw, ph;
+    if (this.state.mode === "reframe") {
+      const w = this.reframeWindow(W, H);
+      ox = w.sx; oy = w.sy; pw = w.sw; ph = w.sh;
+    } else {
+      const vw = (this.videoEl && this.videoEl.videoWidth) || W;
+      const vh = (this.videoEl && this.videoEl.videoHeight) || H;
+      const s = Math.min(W / vw, H / vh);
+      ox = (W - vw * s) / 2; oy = (H - vh * s) / 2;
+      pw = vw * s; ph = vh * s;
+    }
+    const x0 = ox + this._selRect.x0 * pw;
+    const y0 = oy + this._selRect.y0 * ph;
+    const w = (this._selRect.x1 - this._selRect.x0) * pw;
+    const h = (this._selRect.y1 - this._selRect.y0) * ph;
     if (w < 1 || h < 1) return;
     this.ctx.save();
     this.ctx.setLineDash([4, 3]);

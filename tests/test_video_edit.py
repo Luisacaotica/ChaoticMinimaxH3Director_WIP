@@ -425,3 +425,22 @@ def test_decode_refs_roundtrip():
     r, g, b = out[0][2, 3].tolist()
     assert abs(r - 120 / 255) < 0.02 and abs(g - 40 / 255) < 0.02 and abs(b - 220 / 255) < 0.02
     assert decode_refs([]) == []
+
+
+def test_reframe_plate_free_position_align():
+    # free-drag contract: any align fraction in [0, 1] maps to a clamped placement
+    vid = _video(frames=2, h=64, w=32, value=0.5)  # 32x64 vertical
+    rf = default_edit_dict()["reframe"]
+    rf.update({"target_w": 96, "target_h": 54, "feather": 0, "align_x": 0.25, "align_y": 0.75})
+    _, eff, box = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
+    x, y, w, h = box
+    # sw=27, sh=54; sx = round((96-27)*0.25)=17, sy = round((54-54)*0.75)=0
+    assert (x, y, w, h) == (17, 0, 27, 54), box
+    # extreme fractions clamp to the edges
+    rf.update({"align_x": -0.5, "align_y": 1.75})
+    _, eff2, box2 = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
+    x2, y2, _, _ = box2
+    assert x2 == 0 and y2 == 0, box2  # clamped: left + top
+    rf.update({"align_x": 2.0, "align_y": 0.0})
+    _, eff3, box3 = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
+    assert box3[0] == 96 - 27, box3  # clamped: right edge

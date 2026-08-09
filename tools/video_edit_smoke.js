@@ -409,6 +409,31 @@ function check(name, cond, extra) {
   try { ed.setReframeTarget(720, 1280); ed.setReframeAlign("align_x", 0); } catch (e) { rfThrew = e; }
   check("setReframeTarget/Align commit without throwing", rfThrew === null && ed.state.reframe.target_w === 720 && ed.state.reframe.align_x === 0, rfThrew ? rfThrew.message : "");
   check("reframe serializes", JSON.parse(ed.serialize()).reframe.target_w === 720);
+
+  /* reframe preserve brush (painting must work in reframe mode) */
+  ed.playhead = 0.5;
+  ed.onCanvasDown({ clientX: 120, clientY: 80 });
+  ed.onCanvasMove({ clientX: 130, clientY: 90 });
+  ed.onCanvasMove({ clientX: 150, clientY: 100 });
+  ed.onCanvasUp();
+  const rfPainted = Array.from(ed._workMask || []).filter(v => v === 255).length;
+  check("reframe brush paints preserve strokes", rfPainted > 0, "painted=" + rfPainted);
+
+  /* free-drag the source window (move tool) — target 720x1280, mock video 1280x720
+     => vertical letterbox, only align_y has room to travel */
+  ed.setRfTool("move");
+  check("move tool sets cursor + active state", ed._rfTool === "move" && ed.canvas.style.cursor === "move" && ed.rfToolBtns.move.classList.contains("active"));
+  ed.onCanvasDown({ clientX: 400, clientY: 200 });
+  ed.onCanvasMove({ clientX: 400, clientY: 300 });
+  check("window drag moves the placement", Math.abs(ed.state.reframe.align_y - 0.8251) < 0.02, "ay=" + ed.state.reframe.align_y.toFixed(3));
+  ed.onCanvasMove({ clientX: 400, clientY: 600 });
+  check("window drag clamps inside the target", ed.state.reframe.align_y === 1, "ay=" + ed.state.reframe.align_y);
+  check("flush axis is never scribbled", ed.state.reframe.align_x === 0, "ax=" + ed.state.reframe.align_x);
+  ed.onCanvasUp();
+  check("window drag commits on release", JSON.parse(ed.serialize()).reframe.align_y === 1);
+  ed.setRfTool("brush");
+  check("back to brush tool", ed._rfTool === "brush" && ed.canvas.style.cursor === "crosshair");
+
   check("fps row shows the node fps", (ed.fpsInfo.textContent || "").indexOf("fps: node 24") === 0, ed.fpsInfo.textContent);
   ed.setVideoFps(29.97);
   check("fps mismatch flagged in the row", (ed.fpsInfo.textContent || "").indexOf("mismatch") !== -1, ed.fpsInfo.textContent);
