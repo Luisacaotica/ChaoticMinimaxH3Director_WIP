@@ -318,6 +318,16 @@ function check(name, cond, extra) {
   try { ed.onKeyDown(Object.assign(keyEv("r"), { ctrlKey: true })); } catch (e) { check("ctrl+R ignored", false, e.message); }
   check("ctrl+R is ignored (no hijack)", ed.state.render_in === null && ed.state.render_out === null);
 
+  /* shortcuts overlay (? toggles, Esc closes) */
+  let ovOpen = null;
+  try { ed.toggleShortcuts(); ovOpen = ed.helpOverlay && ed.helpOverlay.classList.contains("open"); } catch (e) { ovOpen = "THREW: " + e.message; }
+  check("? overlay toggles open", ovOpen === true, "" + ovOpen);
+  check("? overlay is actually visible (no inline display:none)", ed.helpOverlay && ed.helpOverlay.style.display !== "none", "display=" + (ed.helpOverlay && ed.helpOverlay.style.display));
+  try { ed.onKeyDown(keyEv("?")); } catch (e) { check("? key did not throw", false, e.message); }
+  check("? key closes the overlay", ed.helpOverlay && !ed.helpOverlay.classList.contains("open"));
+  try { ed.onKeyDown(keyEv("Escape")); } catch (e) { check("Esc did not throw", false, e.message); }
+  check("overlay stays closed after Esc", ed.helpOverlay && !ed.helpOverlay.classList.contains("open"));
+
   /* sample color guard without video */
   let sampleThrew = null;
   try { ed.sampleColor(); } catch (e) { sampleThrew = e; }

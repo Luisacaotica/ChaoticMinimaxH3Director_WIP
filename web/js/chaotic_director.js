@@ -80,6 +80,14 @@ const CSS = `
 .chaotic-txtback mark.tok-bad{background:rgba(220,70,70,.5)}
 .chaotic-txtarea{position:relative;background:transparent;color:#e8e8e8}
 .chaotic-statusline{font-size:10px;color:#9a9a9a;min-height:14px}
+.chaotic-overlay{position:absolute;top:8px;right:8px;bottom:8px;left:8px;z-index:60;background:rgba(14,16,20,.97);border:1px solid #383838;border-radius:8px;padding:14px 16px;overflow:auto;display:none;box-shadow:0 6px 24px rgba(0,0,0,.5)}
+.chaotic-overlay.open{display:block}
+.chaotic-overlay h3{margin:0 0 10px;font-size:12px;letter-spacing:.4px;color:#ffcf5a;font-weight:600}
+.chaotic-overlay .row{display:flex;justify-content:space-between;gap:18px;padding:3px 0;border-bottom:1px solid #222;font-size:11px;line-height:1.5}
+.chaotic-overlay .row kbd{background:#262626;border:1px solid #3d3d3d;border-bottom-width:2px;border-radius:4px;padding:0 6px;font:11px ui-monospace,Menlo,monospace;color:#ffd97a;white-space:nowrap}
+.chaotic-overlay .row .d{color:#9a9a9a;text-align:right}
+.chaotic-overlay .x{position:absolute;top:8px;right:10px;cursor:pointer;color:#888;font-size:14px;line-height:1;padding:2px}
+.chaotic-overlay .x:hover{color:#fff}
 /* scrub preview strip */
 .chaotic-preview-stage{position:relative;background:#000;border:1px solid #1c1c1c;border-radius:5px;height:118px;overflow:hidden;display:flex;align-items:center;justify-content:center;flex:none}
 .chaotic-preview-stage video{max-width:100%;max-height:100%;display:none;background:#000}
@@ -545,9 +553,15 @@ class ChaoticDirectorEditor {
     this.ttoolbar.appendChild(tOverlap);
     const tZoom = document.createElement("span");
     tZoom.className = "chaotic-tlabel";
-    tZoom.textContent = "Ctrl+wheel or +/- to zoom";
+    tZoom.textContent = "Ctrl+wheel or +/- to zoom · ? = shortcuts";
     this.zoomLabel = tZoom;
     this.ttoolbar.appendChild(tZoom);
+    const tHelp = document.createElement("button");
+    tHelp.className = "chaotic-btn";
+    tHelp.textContent = "? Help";
+    tHelp.title = "show the timeline keyboard shortcuts (? toggles)";
+    tHelp.addEventListener("click", () => this.toggleShortcuts());
+    this.ttoolbar.appendChild(tHelp);
     this.wrapper.appendChild(this.ttoolbar);
 
     /* timeline viewport */
@@ -577,6 +591,9 @@ class ChaoticDirectorEditor {
     this.statusLine = document.createElement("div");
     this.statusLine.className = "chaotic-statusline";
     this.wrapper.appendChild(this.statusLine);
+    this.wrapper.style.position = "relative";
+    this.helpOverlay = this.buildShortcutsOverlay();
+    this.wrapper.appendChild(this.helpOverlay);
 
     this.container.appendChild(this.wrapper);
 
@@ -1236,6 +1253,54 @@ class ChaoticDirectorEditor {
     this.statusLine.textContent = text;
   }
 
+  /* ---------------- shortcuts overlay (? key / ? Help button) ---------------- */
+  buildShortcutsOverlay() {
+    const ov = document.createElement("div");
+    ov.className = "chaotic-overlay";
+    const title = document.createElement("h3");
+    title.textContent = "⌨️ Timeline shortcuts";
+    ov.appendChild(title);
+    const close = document.createElement("span");
+    close.className = "x";
+    close.textContent = "✕";
+    close.title = "close (Esc or ?)";
+    close.addEventListener("click", () => this.closeShortcuts());
+    ov.appendChild(close);
+    [
+      ["← →", "nudge the selected shot/ref by 1 snap unit (Shift = 10×)"],
+      ["S", "split at the playhead (selected shot, or the one under it)"],
+      ["R", "render window — set IN, set OUT, press again to clear"],
+      ["+ / −", "zoom the timeline (or Ctrl+wheel)"],
+      ["Del", "delete the selected shot / reference"],
+      ["Esc", "clear selection, close menus / this overlay"],
+      ["Right-click", "context menu — split, duplicate, delete, import, grab from library"],
+      ["Double-click", "open an existing shot instead of stacking a new one"],
+      ["Drag", "move a block · grab an edge to trim · drop a timed ref on the library to untime it"],
+    ].forEach(([k, d]) => {
+      const row = document.createElement("div");
+      row.className = "row";
+      const kbd = document.createElement("kbd");
+      kbd.textContent = k;
+      const desc = document.createElement("span");
+      desc.className = "d";
+      desc.textContent = d;
+      row.appendChild(kbd);
+      row.appendChild(desc);
+      ov.appendChild(row);
+    });
+    return ov;   /* hidden by the base CSS rule; the .open class shows it */
+  }
+
+  toggleShortcuts() {
+    if (!this.helpOverlay) return;
+    const open = this.helpOverlay.classList.toggle("open");
+    if (open) this.updateStatus("Shortcuts — press ? or Esc to close.");
+  }
+
+  closeShortcuts() {
+    if (this.helpOverlay) this.helpOverlay.classList.remove("open");
+  }
+
   /* ---------------- timeline drawing ---------------- */
   renderTimeline() {
     if (!this.canvas || !this.ctx) return;
@@ -1866,7 +1931,15 @@ class ChaoticDirectorEditor {
       const dir = (e.key === "-" || e.key === "_") ? -1 : 1;
       this.zoom = clamp(this.zoom + dir * 0.2, 1, 6);
       this.renderTimeline();
+    } else if (e.key === "?") {
+      /* shortcuts overlay (Shift+/ on US layouts) */
+      e.preventDefault();
+      this.toggleShortcuts();
     } else if (e.key === "Escape") {
+      if (this.helpOverlay && this.helpOverlay.classList.contains("open")) {
+        this.closeShortcuts();
+        return;   /* Esc while help is open only dismisses help */
+      }
       this.closeContextMenu();
       this.closeTagMenu();
       if (this.selectedId) {

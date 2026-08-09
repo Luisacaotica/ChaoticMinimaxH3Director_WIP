@@ -307,6 +307,16 @@ function check(name, cond, extra) {
   try { ed.onKeyDown(Object.assign(keyEv("r"), { ctrlKey: true })); } catch (e) { check("ctrl+R ignored", false, e.message); }
   check("ctrl+R is ignored (no hijack)", ed.renderIn === null && ed.renderOut === null);
 
+  /* shortcuts overlay (? toggles, Esc closes) */
+  let ovOpen = null;
+  try { ed.toggleShortcuts(); ovOpen = ed.helpOverlay && ed.helpOverlay.classList.contains("open"); } catch (e) { ovOpen = "THREW: " + e.message; }
+  check("? overlay toggles open", ovOpen === true, "" + ovOpen);
+  check("? overlay is actually visible (no inline display:none)", ed.helpOverlay && ed.helpOverlay.style.display !== "none", "display=" + (ed.helpOverlay && ed.helpOverlay.style.display));
+  try { ed.onKeyDown(keyEv("?")); } catch (e) { check("? key did not throw", false, e.message); }
+  check("? key closes the overlay", ed.helpOverlay && !ed.helpOverlay.classList.contains("open"));
+  try { ed.onKeyDown(keyEv("Escape")); } catch (e) { check("Esc did not throw", false, e.message); }
+  check("overlay stays closed after Esc", ed.helpOverlay && !ed.helpOverlay.classList.contains("open"));
+
   /* easing modes (module helpers + key strip + inspector dropdown) */
   const hero = ed.layerById("layer_hero");
   const p0 = hero.keys.find(k => Math.abs(k.t) < 0.02);

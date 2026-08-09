@@ -317,6 +317,16 @@ function check(name, cond, extra) {
   check("third R clears the render window", ed.renderIn === null && ed.renderOut === null, "in=" + ed.renderIn + " out=" + ed.renderOut);
   try { ed.onKeyDown(keyEv("r").ctrlKey ? keyEv("r") : Object.assign(keyEv("r"), { ctrlKey: true })); } catch (e) { check("ctrl+R did not throw", false, e.message); }
   check("ctrl+R is ignored (no hijack of browser reload)", ed.renderIn === null && ed.renderOut === null, "in=" + ed.renderIn + " out=" + ed.renderOut);
+
+  /* shortcuts overlay (? toggles, Esc closes) */
+  let ovOpen = null;
+  try { ed.toggleShortcuts(); ovOpen = ed.helpOverlay && ed.helpOverlay.classList.contains("open"); } catch (e) { ovOpen = "THREW: " + e.message; }
+  check("? overlay toggles open", ovOpen === true, "" + ovOpen);
+  check("? overlay is actually visible (no inline display:none)", ed.helpOverlay && ed.helpOverlay.style.display !== "none", "display=" + (ed.helpOverlay && ed.helpOverlay.style.display));
+  try { ed.onKeyDown(keyEv("?")); } catch (e) { check("? key did not throw", false, e.message); }
+  check("? key closes the overlay", ed.helpOverlay && !ed.helpOverlay.classList.contains("open"));
+  try { ed.onKeyDown(keyEv("Escape")); } catch (e) { check("Esc did not throw", false, e.message); }
+  check("overlay stays closed after Esc", ed.helpOverlay && !ed.helpOverlay.classList.contains("open"));
   const zoom0 = ed.zoom;
   try { ed.onKeyDown(keyEv("+")); } catch (e) { check("+ zoom did not throw", false, e.message); }
   check("+ zooms in by one step", Math.abs(ed.zoom - (zoom0 + 0.2)) < 1e-9, "zoom=" + ed.zoom);
