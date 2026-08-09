@@ -1,8 +1,12 @@
 # CI-only dependencies for .github/workflows/ci.yml.
 # The unit tests exercise the pack's pure layers (chunking, timeline, masks,
 # stitching, crops) — they need torch/numpy/pillow but no GPU and no ComfyUI.
+# torchaudio comes from the same CPU index so it matches the installed torch
+# (the stitching tests exercise audio sample-rate unification, which resamples
+# via torchaudio when rates differ).
 pytest>=8
 numpy>=1.26
 pillow>=10
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch>=2.2
+torchaudio>=2.2
