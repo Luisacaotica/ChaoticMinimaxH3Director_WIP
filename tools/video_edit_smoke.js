@@ -292,6 +292,71 @@ function check(name, cond, extra) {
   try { ed.sampleColor(); } catch (e) { sampleThrew = e; }
   check("sampleColor does not throw without video", sampleThrew === null, sampleThrew ? sampleThrew.message : "");
 
+  /* ---- mask tracking (pure helpers + widget path) ---- */
+  const gray = sandbox.veGray({ width: 2, height: 1, data: new Uint8ClampedArray([255, 255, 255, 255, 0, 0, 0, 255]) });
+  check("veGray luminance", Math.abs(gray[0] - 1) < 1e-6 && Math.abs(gray[1] - 0) < 1e-6);
+  const pg = new Float32Array(16);
+  pg[5] = 0.5;
+  const patch = sandbox.vePatch(pg, 4, 4, 1, 1, 2, 2);
+  check("vePatch extracts the centered cells", patch.data[0] === 0 && patch.data[3] === 0.5, "v=" + patch.data[3]);
+  const a = new Float32Array([0.1, 0.2, 0.3, 0.4, 0.9]);
+  check("veNcc identical ~ 1", Math.abs(sandbox.veNcc(a, a.slice()) - 1) < 1e-9);
+  const anti = new Float32Array(Array.from(a, v => 1 - v));
+  check("veNcc anticorrelated ~ -1", Math.abs(sandbox.veNcc(a, anti) + 1) < 1e-9);
+
+  const fw = 60, fh = 40;
+  function makeFrame(bx, by) {
+    const g = new Float32Array(fw * fh);
+    for (let y = 0; y < fh; y++) for (let x = 0; x < fw; x++) g[y * fw + x] = (x / fw) * 0.2;  // gradient texture
+    for (let y = by - 3; y <= by + 3; y++) for (let x = bx - 3; x <= bx + 3; x++) {
+      if (x >= 0 && y >= 0 && x < fw && y < fh) g[y * fw + x] = 0.8;
+    }
+    return g;
+  }
+  const f0 = makeFrame(15, 12), f1 = makeFrame(30, 20);
+  const tpl = sandbox.vePatch(f0, fw, fh, 15, 12, 14, 14);
+  const hit = sandbox.veSearch(f1, fw, fh, tpl, 15, 12, 20, 2);
+  check("veSearch finds the moved blob", Math.abs(hit.dx - 15) <= 1 && Math.abs(hit.dy - 8) <= 1,
+    "dx=" + hit.dx + " dy=" + hit.dy + " score=" + hit.score.toFixed(3));
+  check("veSearch reports a high score", hit.score > 0.8, "score=" + hit.score.toFixed(3));
+  const flat = new Float32Array(fw * fh);  // zero variance
+  const flatHit = sandbox.veSearch(flat, fw, fh, tpl, 15, 12, 20, 2);
+  check("veSearch scores flat frames ~0 (below any floor)", flatHit.score < 0.6, "score=" + flatHit.score.toFixed(3));
+
+  const tb = new Uint8ClampedArray(64 * 36);
+  for (let y = 10; y < 20; y++) for (let x = 10; x < 30; x++) tb[y * 64 + x] = 255;
+  const bbox = sandbox.veMaskBBox(tb, 64, 36);
+  check("veMaskBBox finds the painted rect", bbox && bbox.x === 10 && bbox.y === 10 && bbox.w === 20 && bbox.h === 10,
+    JSON.stringify(bbox));
+  const tr = sandbox.veTranslateMask(tb, 64, 36, 8, 4);
+  check("veTranslateMask shifts the mask", tr[14 * 64 + 18] === 255 && tr[10 * 64 + 10] === 0,
+    "v=" + tr[14 * 64 + 18]);
+
+  const keysBefore = ed.state.mask.keys.length;
+  ed._gridW = 64; ed._gridH = 36;
+  const added = ed.applyTrackKeys(tb, [{ t: 1.0, dx: 8, dy: 4, score: 0.9 }], 64, 36);
+  const k1 = ed.keyAt(1.0);
+  check("applyTrackKeys writes a tracked key", added === 1 && !!k1 && typeof k1.png === "string" && k1.png.length > 0,
+    "added=" + added);
+  check("applyTrackKeys sorted the key in", ed.state.mask.keys.length === keysBefore + 1 && k1.grid_w === 64);
+
+  check("track UI built (button + progress + options)", !!ed.trackBtn && !!ed.trackProg
+    && ed._trackOpts.every === 2 && ed._trackOpts.floor === 0.6);
+  let trackThrew = null;
+  try { await ed.trackMask(); } catch (e) { trackThrew = e; }
+  check("trackMask on a flat/black preview adds no keys and does not throw",
+    trackThrew === null && ed.state.mask.keys.length === keysBefore + 1 && ed._tracking === false,
+    trackThrew ? trackThrew.message : "keys=" + ed.state.mask.keys.length);
+  let clearThrew = null;
+  try {
+    ed._workMask = null;              // the state on a fresh node before any paint
+    ed.clearMaskKeys();               // must not crash (guard against null)
+    ed._workMask = new Uint8ClampedArray(64 * 36);
+    ed.clearMaskKeys();
+  } catch (e) { clearThrew = e; }
+  check("clearMaskKeys survives a null work mask and commits",
+    clearThrew === null && ed.state.mask.keys.length === 0, clearThrew ? clearThrew.message : "");
+
   /* fresh node path */
   (async () => {
     const NodeType2 = function () {

@@ -126,6 +126,29 @@ def test_build_masks_cross_fades_between_keys():
     assert masks_hold[3, 32, 48].item() == pytest.approx(1.0)
 
 
+def test_tracked_mask_keys_move_the_region():
+    """A client-side track writes translated keys — the renderer must move the
+    masked region with them (the mask follows the subject)."""
+    gw, gh = 32, 24
+    rect_a = _mask_png(gw, gh, (4, 4, 12, 12))    # subject at grid 4..12
+    rect_b = _mask_png(gw, gh, (12, 8, 20, 16))   # translated +8,+4, like a track
+    edit = _edit_with_mask([
+        {"t": 0.0, "grid_w": gw, "grid_h": gh, "png": rect_a},
+        {"t": 1.0, "grid_w": gw, "grid_h": gh, "png": rect_b},
+    ])
+    masks = build_masks(edit, 2, 4, 96, 128)      # t = 0, 0.5, 1.0, 1.5
+    # video grid = 128//4 x 96//4 = 32x24 -> 4 video px per grid cell
+    assert mask_bbox(masks[0]) == (16, 16, 32, 32)   # rect_a at t=0
+    assert mask_bbox(masks[2]) == (48, 32, 32, 32)   # rect_b at t=1.0 exactly
+    mid = mask_bbox(masks[1])                        # t=0.5: cross-fade spans both
+    assert mid == (16, 16, 64, 48), mid
+    # the region really moved: a cell inside B (but outside A) is masked only later
+    assert masks[0, 40, 60].item() == pytest.approx(0.0)   # not in A at t=0
+    assert masks[2, 40, 60].item() == pytest.approx(1.0)   # inside B at t=1
+    assert masks[0, 30, 30].item() == pytest.approx(1.0)   # inside A at t=0
+    assert masks[2, 30, 30].item() == pytest.approx(0.0)   # left behind at t=1
+
+
 def test_effective_mask_inverts_for_outside():
     m = torch.zeros(4, 8, 8)
     m[:, 2:6, 2:6] = 1.0

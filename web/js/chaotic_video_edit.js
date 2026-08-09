@@ -42,6 +42,8 @@ const VE_CSS = `
 .ve-range{flex:1;accent-color:#4aa47f;height:4px;min-width:70px}
 .ve-legend{font-size:9px;color:#777;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:2px 2px}
 .ve-statusline{font-size:10px;color:#9a9a9a;min-height:14px}
+.ve-track-prog-wrap{flex:1;height:6px;background:#101214;border:1px solid #262626;border-radius:3px;overflow:hidden;min-width:60px}
+.ve-track-prog{height:100%;width:0;background:#4aa47f;transition:width .1s}
 `;
 
 if (!document.getElementById("chaotic-ve-styles")) {
@@ -60,6 +62,108 @@ function veFmt(sec) {
 }
 function veUid(prefix) {
   return prefix + "_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
+}
+
+/* ------------------------------------------------------------------ */
+/* Mask tracking — pure, DOM-free helpers (unit-testable)             */
+/* ------------------------------------------------------------------ */
+function veGray(imageData) {
+  /* RGBA ImageData -> grayscale Float32Array at the same size (0..1). */
+  const d = imageData.data;
+  const n = imageData.width * imageData.height;
+  const out = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    out[i] = (0.299 * d[i * 4] + 0.587 * d[i * 4 + 1] + 0.114 * d[i * 4 + 2]) / 255;
+  }
+  return out;
+}
+
+function vePatch(gray, w, h, cx, cy, pw, ph) {
+  /* Extract a (pw x ph) grayscale patch centered at (cx, cy), clamped to the
+     frame (out-of-range cells read 0). Returns { data, w, h, ox, oy }. */
+  const data = new Float32Array(pw * ph);
+  const x0 = Math.round(cx - pw / 2), y0 = Math.round(cy - ph / 2);
+  for (let y = 0; y < ph; y++) {
+    const sy = y0 + y;
+    if (sy < 0 || sy >= h) continue;
+    for (let x = 0; x < pw; x++) {
+      const sx = x0 + x;
+      if (sx < 0 || sx >= w) continue;
+      data[y * pw + x] = gray[sy * w + sx];
+    }
+  }
+  return { data, w: pw, h: ph, ox: x0, oy: y0 };
+}
+
+function veNcc(a, b) {
+  /* Normalized cross-correlation of two equal-length Float32Arrays.
+     Mean-subtracted, unit-normalized: 1 = identical, 0 = uncorrelated. */
+  const n = a.length;
+  if (n === 0) return 0;
+  let ma = 0, mb = 0;
+  for (let i = 0; i < n; i++) { ma += a[i]; mb += b[i]; }
+  ma /= n; mb /= n;
+  let num = 0, da = 0, db = 0;
+  for (let i = 0; i < n; i++) {
+    const x = a[i] - ma, y = b[i] - mb;
+    num += x * y; da += x * x; db += y * y;
+  }
+  const den = Math.sqrt(da * db);
+  return den < 1e-9 ? 0 : num / den;
+}
+
+function veSearch(frame, fw, fh, tpl, cx, cy, radius, step) {
+  /* Two-stage NCC search around (cx, cy): coarse at `step`, then a 3x3 fine
+     pass. Returns { dx, dy, score } where dx/dy are offsets from (cx, cy). */
+  const tw = tpl.w, th = tpl.h;
+  const r = Math.max(1, Math.round(radius));
+  const s = Math.max(1, Math.round(step || 2));
+  let best = { dx: 0, dy: 0, score: -2 };
+  for (let dy = -r; dy <= r; dy += s) {
+    for (let dx = -r; dx <= r; dx += s) {
+      const sc = veNcc(vePatch(frame, fw, fh, cx + dx, cy + dy, tw, th).data, tpl.data);
+      if (sc > best.score) best = { dx, dy, score: sc };
+    }
+  }
+  for (let dy = best.dy - 1; dy <= best.dy + 1; dy++) {
+    for (let dx = best.dx - 1; dx <= best.dx + 1; dx++) {
+      const sc = veNcc(vePatch(frame, fw, fh, cx + dx, cy + dy, tw, th).data, tpl.data);
+      if (sc > best.score) best = { dx, dy, score: sc };
+    }
+  }
+  return best;
+}
+
+function veMaskBBox(mask, gw, gh) {
+  /* Union bounding box of painted (non-zero) mask cells -> {x, y, w, h} or null. */
+  let x0 = gw, y0 = gh, x1 = -1, y1 = -1;
+  for (let y = 0; y < gh; y++) {
+    for (let x = 0; x < gw; x++) {
+      if (mask[y * gw + x]) {
+        if (x < x0) x0 = x;
+        if (x > x1) x1 = x;
+        if (y < y0) y0 = y;
+        if (y > y1) y1 = y;
+      }
+    }
+  }
+  if (x1 < 0) return null;
+  return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
+}
+
+function veTranslateMask(mask, gw, gh, gdx, gdy) {
+  /* Shift the painted mask by (gdx, gdy) grid cells; out-of-frame -> 0. */
+  const out = new Uint8ClampedArray(gw * gh);
+  for (let y = 0; y < gh; y++) {
+    const sy = y - gdy;
+    if (sy < 0 || sy >= gh) continue;
+    for (let x = 0; x < gw; x++) {
+      const sx = x - gdx;
+      if (sx < 0 || sx >= gw) continue;
+      out[y * gw + x] = mask[sy * gw + sx];
+    }
+  }
+  return out;
 }
 
 class ChaoticVideoEdit {
@@ -83,6 +187,9 @@ class ChaoticVideoEdit {
     this._gridW = 0; this._gridH = 0;
     this._lastWidth = 0; this._lastScale = 0;
     this._raf = null;
+    /* mask tracking options (transient UI prefs, not serialized) */
+    this._trackOpts = { every: 2, search: 15, floor: 0.6, refresh: 12 };
+    this._tracking = false;
 
     this.editDataWidget = node.widgets.find(w => w.name === "edit_data");
     this.fpsWidget = node.widgets.find(w => w.name === "fps");
@@ -304,9 +411,71 @@ class ChaoticVideoEdit {
     keyRow.className = "ve-row";
     const btnSetKey = this.btn("Set Mask Key", () => this.setMaskKey());
     const btnDelKey = this.btn("Del Mask Key", () => this.delMaskKey());
+    const btnClear = this.btn("Clear Mask Keys", () => this.clearMaskKeys());
+    btnClear.className = "ve-btn danger";
     keyRow.appendChild(btnSetKey);
     keyRow.appendChild(btnDelKey);
+    keyRow.appendChild(btnClear);
     this.inpaintPanel.appendChild(keyRow);
+
+    /* auto-track a painted region (template matching, forward + backward) */
+    const trackRow = document.createElement("div");
+    trackRow.className = "ve-row";
+    const btnTrack = this.btn("Track Mask", () => this.trackMask());
+    btnTrack.className = "ve-btn";
+    this.trackBtn = btnTrack;
+    const progWrap = document.createElement("div");
+    progWrap.className = "ve-track-prog-wrap";
+    const progBar = document.createElement("div");
+    progBar.className = "ve-track-prog";
+    this.trackProg = progBar;
+    progWrap.appendChild(progBar);
+    trackRow.appendChild(btnTrack);
+    trackRow.appendChild(progWrap);
+    this.inpaintPanel.appendChild(trackRow);
+
+    const trackOptRow = document.createElement("div");
+    trackOptRow.className = "ve-row";
+    const mkNum = (prop, min, max, step, label) => {
+      trackOptRow.appendChild(this.btnL(label));
+      const inp = document.createElement("input");
+      inp.className = "ve-input";
+      inp.type = "number";
+      inp.step = step;
+      inp.min = String(min);
+      inp.max = String(max);
+      inp.value = this._trackOpts[prop];
+      inp.addEventListener("change", () => {
+        this._trackOpts[prop] = veClamp(Number(inp.value) || min, min, max);
+      });
+      trackOptRow.appendChild(inp);
+    };
+    const mkRange = (prop, min, max, step, label) => {
+      trackOptRow.appendChild(this.btnL(label));
+      const inp = document.createElement("input");
+      inp.className = "ve-range";
+      inp.type = "range";
+      inp.min = String(min);
+      inp.max = String(max);
+      inp.step = String(step);
+      inp.value = String(this._trackOpts[prop]);
+      inp.style.flex = "0 0 70px";
+      inp.addEventListener("input", () => {
+        this._trackOpts[prop] = Number(inp.value);
+        inp.title = label + ": " + inp.value;
+      });
+      trackOptRow.appendChild(inp);
+    };
+    mkNum("every", 1, 30, "1", "Every");
+    mkRange("search", 3, 40, 1, "Search %");
+    mkRange("floor", 0.3, 0.95, 0.01, "Score ≥");
+    mkNum("refresh", 2, 60, "1", "Refresh");
+    this.inpaintPanel.appendChild(trackOptRow);
+    const trackHint = document.createElement("div");
+    trackHint.className = "ve-hint";
+    trackHint.style.position = "static";
+    trackHint.textContent = "paint a region, press Track Mask — the mask follows the subject forward and backward (template matching).";
+    this.inpaintPanel.appendChild(trackHint);
 
     const promptRow = document.createElement("div");
     promptRow.className = "ve-row";
@@ -635,6 +804,194 @@ class ChaoticVideoEdit {
     this.state.mask.keys = this.state.mask.keys.filter(x => x !== k);
     this.updateStatus("Mask key removed.");
     this.commitChanges();
+  }
+
+  clearMaskKeys() {
+    this.state.mask.keys = [];
+    if (this._workMask) this._workMask.fill(0);   // null until the first paint
+    this.commitChanges();
+    this.updateStatus("All mask keys cleared.");
+  }
+
+  /* ---------------- mask tracking ---------------- */
+  async trackMask() {
+    if (this._tracking) return;
+    if (!this.videoEl || !this.videoEl.src || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
+      this.updateStatus("Load a video first, then paint a region and press Track Mask.");
+      return;
+    }
+    this.ensureGrid();
+    const gw = this._gridW, gh = this._gridH;
+    const start = this.playhead;
+    /* base mask = the key at the playhead, else the painted work mask */
+    const base = new Uint8ClampedArray(gw * gh);
+    const existing = this.keyAt(start);
+    if (existing) {
+      this.decodeMaskInto(base, existing.png, existing.grid_w, existing.grid_h);
+    } else {
+      let has = false;
+      for (let i = 0; i < base.length; i++) if (this._workMask[i]) { has = true; break; }
+      if (!has) { this.updateStatus("Paint a region first (or set a mask key), then press Track Mask."); return; }
+      base.set(this._workMask);
+    }
+    const opts = {
+      every: Math.max(1, Math.round(this._trackOpts.every)),
+      search: veClamp(Number(this._trackOpts.search), 3, 40),
+      floor: veClamp(Number(this._trackOpts.floor), 0.3, 0.95),
+      refresh: Math.max(2, Math.round(this._trackOpts.refresh)),
+    };
+    const step = opts.every / this.fps;
+    this._tracking = true;
+    this.updateTrackUI(true, 0);
+    let fwd = [], bwd = [], trackErr = null;
+    try {
+      fwd = await this.trackDirection(base, start, step, opts, 1);
+      bwd = await this.trackDirection(base, start, -step, opts, -1);
+    } catch (err) {
+      trackErr = err;
+    } finally {
+      this._tracking = false;
+      this.updateTrackUI(false, 0);
+    }
+    if (trackErr) {
+      this.setPlayhead(start);
+      this.updateStatus("Tracking failed — " + (trackErr && trackErr.message ? trackErr.message : trackErr));
+      return;
+    }
+    const added = this.applyTrackKeys(base, fwd.concat(bwd), gw, gh);
+    const fwdT = fwd.length ? fwd[fwd.length - 1].t : start;
+    const bwdT = bwd.length ? bwd[bwd.length - 1].t : start;
+    this.setPlayhead(start);
+    if (!added) {
+      this.updateStatus("Tracking lost immediately (score below the floor) — lower \u201cScore \u2265\u201d or increase \u201cSearch\u201d.");
+      return;
+    }
+    this.updateStatus(
+      `Tracked \u2192 ${veFmt(fwdT)} and \u2190 ${veFmt(bwdT)} — ${added} mask key(s) added. ` +
+      "Scrub to review; fix any frame manually and re-track."
+    );
+  }
+
+  async trackDirection(base, start, step, opts, dir) {
+    const vw = this.videoEl.videoWidth || 1280, vh = this.videoEl.videoHeight || 720;
+    const dur = this.durationSec;
+    const gw = this._gridW, gh = this._gridH;
+    const trackW = 160, trackH = Math.max(8, Math.round(trackW * vh / vw));
+    const off = document.createElement("canvas");
+    off.width = trackW; off.height = trackH;
+    const octx = off.getContext("2d", { willReadFrequently: true });
+    /* seed the template from the frame at `start`, at the mask bbox center */      await this.seekVideo(start);
+    octx.drawImage(this.videoEl, 0, 0, trackW, trackH);
+    let frameGray;
+    try {
+      frameGray = veGray(octx.getImageData(0, 0, trackW, trackH));
+    } catch (e) {
+      throw new Error("cannot read video pixels (canvas tainted?) — " + (e && e.message ? e.message : e));
+    }
+    const bbox = veMaskBBox(base, gw, gh);
+    if (!bbox) return [];
+    const cx = (bbox.x + bbox.w / 2) * (trackW / gw);
+    const cy = (bbox.y + bbox.h / 2) * (trackH / gh);
+    const pw = veClamp(Math.round(bbox.w * (trackW / gw)), 8, 48);
+    const ph = veClamp(Math.round(bbox.h * (trackH / gh)), 8, 48);
+    let tpl = vePatch(frameGray, trackW, trackH, cx, cy, pw, ph);
+    const radius = Math.max(6, Math.round((opts.search / 100) * trackW));
+    const out = [];
+    let px = cx, py = cy, sinceRefresh = 0;
+    const times = [];
+    for (let t = start + step; dir > 0 ? t <= dur + 1e-6 : t >= -1e-6; t += step) {
+      times.push(veClamp(t, 0, dur));
+    }
+    for (const t of times) {
+      const frac = dir > 0
+        ? (t - start) / Math.max(0.001, dur - start)
+        : (start - t) / Math.max(0.001, start);
+      this.updateTrackUI(true, frac);
+      await this.seekVideo(t);
+      octx.drawImage(this.videoEl, 0, 0, trackW, trackH);
+      try {
+        frameGray = veGray(octx.getImageData(0, 0, trackW, trackH));
+      } catch (e) {
+        throw new Error("cannot read video pixels (canvas tainted?) — " + (e && e.message ? e.message : e));
+      }
+      const hit = veSearch(frameGray, trackW, trackH, tpl, px, py, radius, 2);
+      if (hit.score < opts.floor) break;
+      px += hit.dx;
+      py += hit.dy;
+      out.push({
+        t,
+        dx: Math.round((px - cx) * gw / trackW),
+        dy: Math.round((py - cy) * gh / trackH),
+        score: hit.score,
+      });
+      if (++sinceRefresh >= opts.refresh) {
+        sinceRefresh = 0;
+        tpl = vePatch(frameGray, trackW, trackH, px, py, pw, ph);
+      }
+    }
+    return out;
+  }
+
+  applyTrackKeys(base, path, gw, gh) {
+    if (!path.length) return 0;
+    let added = 0;
+    path.forEach(entry => {
+      const translated = veTranslateMask(base, gw, gh, entry.dx, entry.dy);
+      const png = this.maskToPng(translated, gw, gh);
+      const t = Math.round(entry.t * 1000) / 1000;
+      const existing = this.keyAt(t);
+      if (existing) {
+        existing.png = png;
+        existing.grid_w = gw;
+        existing.grid_h = gh;
+      } else {
+        this.state.mask.keys.push({ t, grid_w: gw, grid_h: gh, png });
+        added++;
+      }
+    });
+    this.state.mask.keys.sort((a, b) => a.t - b.t);
+    this.commitChanges();
+    return added;
+  }
+
+  updateTrackUI(active, frac) {
+    if (this.trackBtn) {
+      this.trackBtn.disabled = !!active;
+      this.trackBtn.textContent = active ? "Tracking… " + Math.round(veClamp(frac, 0, 1) * 100) + "%" : "Track Mask";
+    }
+    if (this.trackProg) this.trackProg.style.width = Math.round(veClamp(frac, 0, 1) * 100) + "%";
+  }
+
+  decodeMaskInto(target, b64, gw, gh) {
+    target.fill(0);
+    if (!b64) return;
+    try {
+      const img = new Image();
+      img.src = "data:image/png;base64," + b64;
+      const c = document.createElement("canvas");
+      c.width = gw; c.height = gh;
+      const cc = c.getContext("2d");
+      cc.drawImage(img, 0, 0);
+      const d = cc.getImageData(0, 0, gw, gh).data;
+      for (let i = 0; i < Math.min(target.length, gw * gh); i++) target[i] = d[i * 4];
+    } catch (e) { /* corrupt key -> empty */ }
+  }
+
+  seekVideo(t) {
+    return new Promise(resolve => {
+      const v = this.videoEl;
+      if (!v) { resolve(); return; }
+      if (v.readyState >= 1 && Math.abs(v.currentTime - t) < 0.02) { resolve(); return; }
+      let timer = null;
+      const done = () => {
+        if (v) v.removeEventListener("seeked", done);
+        if (timer) clearTimeout(timer);
+        resolve();
+      };
+      timer = setTimeout(done, 2000);
+      v.addEventListener("seeked", done);
+      try { v.currentTime = t; } catch (e) { done(); }
+    });
   }
 
   maskToPng(data, gw, gh) {
