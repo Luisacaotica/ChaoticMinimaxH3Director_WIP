@@ -18,11 +18,11 @@ const { api } = window.comfyAPI.api;
 const VE_GRID_DIV = 4;
 
 const VE_CSS = `
-.ve-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:row;gap:0;width:100%;box-sizing:border-box;color:#dcdcdc;font-size:11px;min-height:400px}
-.ve-left{display:flex;flex-direction:column;gap:6px;width:280px;min-width:240px;max-width:340px;flex-shrink:0;overflow-y:auto;overflow-x:hidden;padding-right:8px;border-right:1px solid #2a2a2a;scrollbar-width:thin;scrollbar-color:#3c3c3c transparent}
+.ve-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:grid;grid-template-columns:minmax(240px,280px) minmax(0,1fr);gap:8px;width:100%;min-width:0;box-sizing:border-box;color:#dcdcdc;font-size:11px;min-height:480px;align-items:start}
+.ve-left{display:flex;flex-direction:column;gap:6px;min-width:0;box-sizing:border-box;overflow-y:auto;overflow-x:hidden;padding-right:8px;border-right:1px solid #2a2a2a;scrollbar-width:thin;scrollbar-color:#3c3c3c transparent}
 .ve-left::-webkit-scrollbar{width:5px}
 .ve-left::-webkit-scrollbar-thumb{background:#3c3c3c;border-radius:3px}
-.ve-right{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0;overflow:hidden}
+.ve-right{display:flex;flex-direction:column;gap:6px;min-width:0;min-height:430px;overflow:hidden;padding-left:2px}
 .ve-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0}
 .ve-btn{background:#232323;color:#ddd;border:1px solid #2e2e2e;border-radius:4px;padding:5px 9px;font-size:11px;cursor:pointer;display:flex;align-items:center;gap:5px;transition:background .15s,border-color .15s;font-family:inherit}
 .ve-btn:hover{background:#333;border-color:#555}
@@ -1051,7 +1051,9 @@ class ChaoticVideoEdit {
       this.commitChanges();
     });
     return s;
-  }  updateStatus(text) {
+  }
+
+  updateStatus(text) {
     this.statusLine.textContent = text;
   }
 
@@ -2957,6 +2959,16 @@ class ChaoticVideoEdit {
     } catch (err) {
       if (err.name !== "AbortError") console.error("[ChaoticVideoEdit] load failed", err);
     }
+  }
+
+  recomputeSize() {
+    /* ComfyUI can resize the DOM host before the canvas has its new CSS width.
+       Mark the cached dimensions dirty; the existing RAF loop redraws on the
+       following frame once layout is complete. */
+    this._lastWidth = 0;
+    this._lastScale = 0;
+    if (this.domWidget && this.domWidget.computeSize) this.domWidget.computeSize();
+    if (window.app && window.app.graph) window.app.graph.setDirtyCanvas(true, true);
   }
 }
 

@@ -31,18 +31,18 @@ const AUDIO_MARKERS = ["fully_copy", "partially_copy", "reference", "weak_refere
 const HIDDEN = ["timeline_data"];
 
 const CSS = `
-.chaotic-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:row;gap:0;width:100%;box-sizing:border-box;color:#dcdcdc;font-size:11px;min-height:400px}
-.chaotic-left{display:flex;flex-direction:column;gap:6px;width:300px;min-width:260px;max-width:360px;flex-shrink:0;overflow-y:auto;overflow-x:hidden;padding-right:8px;border-right:1px solid #2a2a2a;scrollbar-width:thin;scrollbar-color:#3c3c3c transparent}
+.chaotic-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:grid;grid-template-columns:minmax(260px,300px) minmax(0,1fr);gap:8px;width:100%;min-width:0;box-sizing:border-box;color:#dcdcdc;font-size:11px;min-height:480px;align-items:start}
+.chaotic-left{display:flex;flex-direction:column;gap:6px;min-width:0;box-sizing:border-box;overflow-y:auto;overflow-x:hidden;padding-right:8px;border-right:1px solid #2a2a2a;scrollbar-width:thin;scrollbar-color:#3c3c3c transparent}
 .chaotic-left::-webkit-scrollbar{width:5px}
 .chaotic-left::-webkit-scrollbar-thumb{background:#3c3c3c;border-radius:3px}
-.chaotic-right{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0;overflow:hidden}
+.chaotic-right{display:flex;flex-direction:column;gap:6px;min-width:0;min-height:430px;overflow:hidden;padding-left:2px}
 .chaotic-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0}
 .chaotic-btn{background:#232323;color:#ddd;border:1px solid #2e2e2e;border-radius:4px;padding:5px 9px;font-size:11px;cursor:pointer;display:flex;align-items:center;gap:5px;transition:background .15s,border-color .15s;font-family:inherit}
 .chaotic-btn:hover{background:#333;border-color:#555}
 .chaotic-btn.danger:hover{background:#4a1515;border-color:#cc4444;color:#ffb0b0}
 .chaotic-btn.active{background:#1c2b22;border-color:#2f7a50;color:#7ee2a8}
 .chaotic-canvas{border-radius:6px;border:1px solid #1c1c1c;background:#202020;width:100%;display:block;cursor:default;outline:none}
-.chaotic-viewport{overflow-x:auto;overflow-y:hidden;border-radius:6px}
+.chaotic-viewport{height:${TIMELINE_H}px;min-height:${TIMELINE_H}px;overflow-x:auto;overflow-y:hidden;border-radius:6px}
 .chaotic-viewport::-webkit-scrollbar{height:9px}
 .chaotic-viewport::-webkit-scrollbar-thumb{background:#3c3c3c;border-radius:5px}
 .chaotic-panel{background:#1b1b1b;border:1px solid #2a2a2a;border-radius:6px;padding:8px;display:flex;flex-direction:column;gap:6px}

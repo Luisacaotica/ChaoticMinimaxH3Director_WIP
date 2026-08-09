@@ -39,11 +39,11 @@ const KEYSTRIP_GUTTER = 54;    // name column on the left of the strip
 const AUDIO_H = 84;
 
 const CSS = `
-.pup-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:row;gap:0;width:100%;box-sizing:border-box;color:#dcdcdc;font-size:11px;min-height:400px}
-.pup-left{display:flex;flex-direction:column;gap:6px;width:300px;min-width:260px;max-width:360px;flex-shrink:0;overflow-y:auto;overflow-x:hidden;padding-right:8px;border-right:1px solid #2a2a2a;scrollbar-width:thin;scrollbar-color:#3c3c3c transparent}
+.pup-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:grid;grid-template-columns:minmax(260px,300px) minmax(0,1fr);gap:8px;width:100%;min-width:0;box-sizing:border-box;color:#dcdcdc;font-size:11px;min-height:480px;align-items:start}
+.pup-left{display:flex;flex-direction:column;gap:6px;min-width:0;box-sizing:border-box;overflow-y:auto;overflow-x:hidden;padding-right:8px;border-right:1px solid #2a2a2a;scrollbar-width:thin;scrollbar-color:#3c3c3c transparent}
 .pup-left::-webkit-scrollbar{width:5px}
 .pup-left::-webkit-scrollbar-thumb{background:#3c3c3c;border-radius:3px}
-.pup-right{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0;overflow:hidden}
+.pup-right{display:flex;flex-direction:column;gap:6px;min-width:0;min-height:430px;overflow:hidden;padding-left:2px}
 .pup-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0}
 .pup-btn{background:#232323;color:#ddd;border:1px solid #2e2e2e;border-radius:4px;padding:5px 9px;font-size:11px;cursor:pointer;display:flex;align-items:center;gap:5px;transition:background .15s,border-color .15s;font-family:inherit}
 .pup-btn:hover{background:#333;border-color:#555}
