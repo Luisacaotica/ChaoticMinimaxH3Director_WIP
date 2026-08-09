@@ -225,6 +225,12 @@ Everything below is baked into the three editors — no new sockets, same save f
 - **Right-click context menus** — on a shot: *Split at playhead* (moves the playhead if needed), *Duplicate*, *Delete*. On a reference: *Preview*, *Move to library / Place on timeline*, *Role* toggle, *Delete*. On empty track space: *Import Picture/Video/Audio* and *Grab from library* (places the library ref at that exact time).
 - **Delete key** removes the selected shot or reference (ignored while typing). **Esc** clears the selection.
 - **Snap + frame/second mode** — a settings toolbar above the timeline: 🧲 Snap (frame grid at the node's fps, or whole seconds), ⛔ Overlap lock (shots can no longer slide over each other — the drag is blocked to the nearest free gap, and double-clicking an existing shot opens it instead of stacking a new one on top).
+- **Keyboard shortcuts** (when a shot/ref is selected, and never while typing in a field — Ctrl/Alt chords are left alone so browser shortcuts keep working):
+  - `←` `→` — nudge the selected shot/ref by one snap unit (1 frame, or 1 s in second-mode); `Shift` = 10×
+  - `S` — split the selected shot (or the shot under the playhead) at the playhead
+  - `R` — set the render window: `R` at the IN point, `R` at the OUT point, `R` again to clear (draggable handles also appear on the ruler)
+  - `+` / `-` — zoom the timeline (same as Ctrl+wheel)
+  - `Del`/`Backspace` — delete the selected shot/ref · `Esc` — clear selection / close menus
 - **Drag back to the library** — grab a timeline reference and drop it on the open Reference library panel; it flips to library placement.
 - **Bigger scrub preview with audio** — the preview stage is taller, video previews are **unmuted** (🔊 toggle), audio refs actually scrub (the hidden `<audio>` element is live), and ▶ Preview in the inspector now *plays* library videos/audios and shows pictures (it used to do nothing for stills).
 - **Tag autosuggest** — start typing `<` in a shot's prompt and a dropdown of your real `<Picture N>/<Video N>/<Audio N>`/`S#` tags appears (click to insert); there's also an **Insert:** chip row with every available tag, one click from the caret. The "No reference tags" message now tells you exactly which tags you *can* type instead of just complaining.

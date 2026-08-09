@@ -295,6 +295,35 @@ function check(name, cond, extra) {
   } catch (e) { suggestNoShot = "THREW: " + e.message; }
   check("suggestToPrompt warns without a selected shot", suggestNoShot === true, "" + suggestNoShot);
 
+  /* timeline keyboard shortcuts: arrows nudge, S splits, R toggles the render window, +/- zooms */
+  const keyEv = (key, shift) => ({ key, shiftKey: !!shift, target: {}, preventDefault() {} });
+  ed.shotById("shot_a").start = 5; // park it mid-timeline so nudging can't clamp at 0
+  const start0 = 5;
+  try { ed.selectedType = "shot"; ed.selectedId = "shot_a"; ed.onKeyDown(keyEv("ArrowRight")); } catch (e) { check("ArrowRight nudge did not throw", false, e.message); }
+  const start1 = ed.shotById("shot_a").start;
+  check("ArrowRight nudges the selected shot by 1 frame", Math.abs((start1 - start0) - 1 / 24) < 1e-9, "delta=" + (start1 - start0));
+  try { ed.onKeyDown(keyEv("ArrowLeft", true)); } catch (e) { check("Shift+ArrowLeft did not throw", false, e.message); }
+  const start2 = ed.shotById("shot_a").start;
+  check("Shift+ArrowLeft nudges back 10 frames", Math.abs((start2 - start1) + 10 / 24) < 1e-9, "delta=" + (start2 - start1));
+  const shotsBefore = ed.state.shots.length;
+  try { ed.setPlayhead(ed.shotById("shot_a").start + 1); ed.onKeyDown(keyEv("s")); } catch (e) { check("S split did not throw", false, e.message); }
+  check("S splits the shot under the playhead", ed.state.shots.length === shotsBefore + 1, "shots=" + ed.state.shots.length);
+  ed.clearRenderRange();
+  try { ed.setPlayhead(3.5); ed.onKeyDown(keyEv("r")); } catch (e) { check("R IN did not throw", false, e.message); }
+  check("R sets the render IN at the playhead", ed.renderIn === 3.5, "in=" + ed.renderIn);
+  try { ed.setPlayhead(6); ed.onKeyDown(keyEv("R")); } catch (e) { check("R OUT did not throw", false, e.message); }
+  check("second R sets the render OUT", ed.renderOut === 6, "out=" + ed.renderOut);
+  try { ed.onKeyDown(keyEv("r")); } catch (e) { check("third R did not throw", false, e.message); }
+  check("third R clears the render window", ed.renderIn === null && ed.renderOut === null, "in=" + ed.renderIn + " out=" + ed.renderOut);
+  try { ed.onKeyDown(keyEv("r").ctrlKey ? keyEv("r") : Object.assign(keyEv("r"), { ctrlKey: true })); } catch (e) { check("ctrl+R did not throw", false, e.message); }
+  check("ctrl+R is ignored (no hijack of browser reload)", ed.renderIn === null && ed.renderOut === null, "in=" + ed.renderIn + " out=" + ed.renderOut);
+  const zoom0 = ed.zoom;
+  try { ed.onKeyDown(keyEv("+")); } catch (e) { check("+ zoom did not throw", false, e.message); }
+  check("+ zooms in by one step", Math.abs(ed.zoom - (zoom0 + 0.2)) < 1e-9, "zoom=" + ed.zoom);
+  try { ed.onKeyDown(keyEv("-")); } catch (e) { check("- zoom did not throw", false, e.message); }
+  check("- zooms back out", Math.abs(ed.zoom - zoom0) < 1e-9, "zoom=" + ed.zoom);
+  ed.renderIn = 2.0; ed.renderOut = 9.0; // restore for later round-trip checks
+
   /* fresh-node path (empty timeline_data) must also construct */
   (async () => {
     const NodeType2 = function () {

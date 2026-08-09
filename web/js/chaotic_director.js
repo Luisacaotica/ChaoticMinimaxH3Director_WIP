@@ -545,7 +545,7 @@ class ChaoticDirectorEditor {
     this.ttoolbar.appendChild(tOverlap);
     const tZoom = document.createElement("span");
     tZoom.className = "chaotic-tlabel";
-    tZoom.textContent = "Ctrl+wheel to zoom";
+    tZoom.textContent = "Ctrl+wheel or +/- to zoom";
     this.zoomLabel = tZoom;
     this.ttoolbar.appendChild(tZoom);
     this.wrapper.appendChild(this.ttoolbar);
@@ -1799,6 +1799,9 @@ class ChaoticDirectorEditor {
   onKeyDown(e) {
     const t = e.target;
     if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || (t.isContentEditable))) return;
+    /* never hijack browser/OS chords (Ctrl+R reload, Ctrl+S, Ctrl/Alt+arrows, Ctrl+/-) —
+       Shift is fine (shift+= is "+" and Shift+arrows are the 10x nudge) */
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
     if (e.key === "Delete" || e.key === "Backspace") {
       if (this.selectedType === "shot" && this.selectedId) {
         e.preventDefault();
@@ -1807,6 +1810,58 @@ class ChaoticDirectorEditor {
         e.preventDefault();
         this.deleteRef(this.selectedId);
       }
+    } else if (e.key === "ArrowLeft" || e.key === "ArrowRight") {
+      /* nudge the selected shot/ref by one snap unit (Shift = 10x) */
+      e.preventDefault();
+      this.nudgeSelected(e.key === "ArrowLeft" ? -1 : 1, e.shiftKey ? 10 : 1);
+    } else if (e.key === "s" || e.key === "S") {
+      /* split the selected shot — or the shot under the playhead */
+      e.preventDefault();
+      let id = null;
+      if (this.selectedType === "shot" && this.selectedId) id = this.selectedId;
+      else if (this.playhead != null) {
+        const at = this.playhead;
+        const shot = this.state.shots.find(s => at > s.start + MIN_DURATION && at < s.start + s.duration - MIN_DURATION);
+        if (shot) id = shot.id;
+      }
+      if (id) {
+        this.splitShot(id);
+        this.selectedType = "shot";
+        this.selectedId = id;
+        this.buildInspector();
+      } else {
+        this.updateStatus("Select a shot or place the playhead inside one, then press S to split.");
+      }
+    } else if (e.key === "r" || e.key === "R") {
+      /* render window: R sets IN, R again sets OUT, R again clears */
+      e.preventDefault();
+      const at = this.playhead != null ? this.snapTime(this.playhead) : null;
+      if (this.renderIn == null) {
+        this.renderIn = at != null ? at : 0;
+        this.renderOut = null;
+        this.updateStatus("Render IN set at " + fmtSec(this.renderIn) + "s — move the playhead to the OUT point and press R (R before the IN point clears).");
+      } else if (this.renderOut == null || this.renderOut <= this.renderIn) {
+        if (at == null || at <= this.renderIn) {
+          this.renderIn = null;
+          this.renderOut = null;
+          this.updateStatus("Render range cleared.");
+        } else {
+          this.renderOut = at;
+          this.updateStatus("Render range set: " + fmtSec(this.renderIn) + "s → " + fmtSec(this.renderOut) + "s (" + this.renderRangeLabel() + ").");
+        }
+      } else {
+        this.renderIn = null;
+        this.renderOut = null;
+        this.updateStatus("Render range cleared.");
+      }
+      this.commitChanges();
+      this.buildInspector();
+    } else if (e.key === "+" || e.key === "=" || e.key === "-" || e.key === "_") {
+      /* zoom the timeline (same step as Ctrl+wheel) */
+      e.preventDefault();
+      const dir = (e.key === "-" || e.key === "_") ? -1 : 1;
+      this.zoom = clamp(this.zoom + dir * 0.2, 1, 6);
+      this.renderTimeline();
     } else if (e.key === "Escape") {
       this.closeContextMenu();
       this.closeTagMenu();
@@ -1816,6 +1871,30 @@ class ChaoticDirectorEditor {
         this.buildInspector();
         this.renderTimeline();
       }
+    }
+  }
+
+  nudgeSelected(dir, mult) {
+    const unit = this.state.snap && this.state.snap.on
+      ? (this.state.snap.unit === "second" ? 1 : (1 / (this.fps || 24)))
+      : (1 / (this.fps || 24));
+    const step = dir * unit * (mult || 1);
+    if (this.selectedType === "shot" && this.selectedId) {
+      const shot = this.shotById(this.selectedId);
+      if (!shot) return;
+      let ns = this.snapTime(clamp(shot.start + step, 0, Math.max(0, this.duration - shot.duration)));
+      if (this.state.overlap_lock) ns = this.avoidShotOverlap(shot, ns);
+      shot.start = ns;
+      this.commitChanges();
+      this.updateStatus("Shot nudged to " + fmtSec(shot.start) + "s.");
+    } else if (this.selectedType === "ref" && this.selectedId) {
+      const ref = this.refById(this.selectedId);
+      if (!ref || !ref.timed) { this.updateStatus("Only timed refs can be nudged — untime this ref first."); return; }
+      ref.start = this.snapTime(clamp(ref.start + step, 0, Math.max(0, this.duration - ref.duration)));
+      this.commitChanges();
+      this.updateStatus("Ref nudged to " + fmtSec(ref.start) + "s.");
+    } else {
+      this.updateStatus("Select a shot or timed ref first, then use ← → to nudge.");
     }
   }
 
