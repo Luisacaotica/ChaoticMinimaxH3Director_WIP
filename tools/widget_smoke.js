@@ -181,6 +181,8 @@ function check(name, cond, extra) {
     this.widgets = [
       { name: "timeline_data", value: JSON.stringify(savedTimeline) },
       { name: "fps", value: 24 },
+      { name: "render_in", value: -1 },
+      { name: "render_out", value: -1 },
       { name: "chunk_mode", value: "fixed" },
       { name: "chunk_seconds", value: 5 },
       { name: "continuity", value: true },
@@ -317,6 +319,22 @@ function check(name, cond, extra) {
   check("third R clears the render window", ed.renderIn === null && ed.renderOut === null, "in=" + ed.renderIn + " out=" + ed.renderOut);
   try { ed.onKeyDown(keyEv("r").ctrlKey ? keyEv("r") : Object.assign(keyEv("r"), { ctrlKey: true })); } catch (e) { check("ctrl+R did not throw", false, e.message); }
   check("ctrl+R is ignored (no hijack of browser reload)", ed.renderIn === null && ed.renderOut === null, "in=" + ed.renderIn + " out=" + ed.renderOut);
+
+  /* render window node inputs: the R key syncs the widgets, and typing in the
+     widgets moves the timeline window (the Python side prefers the widgets) */
+  check("R cleared the render widgets too", ed.renderInWidget && ed.renderInWidget.value === -1 && ed.renderOutWidget && ed.renderOutWidget.value === -1,
+    "in=" + (ed.renderInWidget && ed.renderInWidget.value) + " out=" + (ed.renderOutWidget && ed.renderOutWidget.value));
+  let wcb = null;
+  try { ed.renderInWidget.callback(7); wcb = ed.renderIn; } catch (e) { wcb = "THREW: " + e.message; }
+  check("typing render_in widget moves the timeline window", wcb === 7, "in=" + wcb);
+  try { ed.renderOutWidget.callback(9); } catch (e) { check("render_out widget did not throw", false, e.message); }
+  check("typing render_out widget sets OUT", ed.renderOut === 9, "out=" + ed.renderOut);
+  try { ed.renderInWidget.callback(-1); } catch (e) { check("render_in = -1 did not throw", false, e.message); }
+  check("render_in = -1 clears the window IN", ed.renderIn === null, "in=" + ed.renderIn);
+  try { ed.renderOutWidget.callback(-1); } catch (e) { check("render_out = -1 did not throw", false, e.message); }
+  check("render_out = -1 clears the window OUT", ed.renderOut === null, "out=" + ed.renderOut);
+  try { ed.renderInWidget.callback(9); ed.renderOutWidget.callback(3); } catch (e) { check("inverted widget pair did not throw", false, e.message); }
+  check("inverted widget pair is cleared (parity with R)", ed.renderIn === null && ed.renderOut === null, "in=" + ed.renderIn + " out=" + ed.renderOut);
 
   /* shortcuts overlay (? toggles, Esc closes) */
   let ovOpen = null;

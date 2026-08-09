@@ -56,7 +56,7 @@ from __future__ import annotations
 import copy
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 TIMELINE_VERSION = 1
 
@@ -444,6 +444,32 @@ def timeline_issues(timeline: Timeline) -> List[str]:
 # --------------------------------------------------------------------------- #
 # Render window slicing (Sony-Vegas style in/out)
 # --------------------------------------------------------------------------- #
+
+
+def resolve_render_window(
+    timeline: Timeline,
+    node_in: Optional[float],
+    node_out: Optional[float],
+) -> Tuple[Timeline, Optional[str]]:
+    """Apply the node's `render_in` / `render_out` input widgets onto the timeline.
+
+    A widget value >= 0 overrides the timeline's own (R-key) window; -1 (or
+    None) leaves the timeline's window alone.  An inverted window (IN at/past
+    OUT) is rejected with a warning and the timeline is returned unchanged.
+    The caller still runs slice_timeline() to actually apply the window.
+    """
+    rin = max(0.0, float(node_in)) if node_in is not None and node_in >= 0 else None
+    rout = float(node_out) if node_out is not None and node_out >= 0 else None
+    if rin is None and rout is None:
+        return timeline, None
+    if rin is not None and rout is not None and rout <= rin:
+        return timeline, (
+            "render window IN is at/past OUT on the node — "
+            "falling back to the timeline's window (or the full render)."
+        )
+    timeline.render_in = rin
+    timeline.render_out = rout
+    return timeline, None
 
 
 def slice_timeline(timeline: Timeline, in_sec: float, out_sec: Optional[float]) -> Timeline:

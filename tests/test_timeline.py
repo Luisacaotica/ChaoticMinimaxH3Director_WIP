@@ -9,6 +9,7 @@ from ChaoticMinimaxH3Director.timeline import (
     assign_global_tags,
     default_timeline_dict,
     parse_timeline,
+    resolve_render_window,
     slice_timeline,
     subject_shorthands,
     timeline_issues,
@@ -192,3 +193,34 @@ def test_render_range_parsed_from_serialized_widget():
     # The default 0..5s shot is clipped to the 2.5..8.0 window.
     sliced = slice_timeline(timeline, timeline.render_in, timeline.render_out)
     assert sliced.shots and sliced.shots[0].duration == pytest.approx(2.5, abs=1e-3)
+
+
+def test_resolve_render_window_node_input_overrides():
+    # resolve_render_window MUTATES its timeline (the node parses a fresh one
+    # each render), so build a fresh copy per case.
+    def with_window():
+        data = default_timeline_dict()
+        data["render_in"] = 2.5
+        data["render_out"] = 8.0
+        return parse_timeline(json.dumps(data))
+
+    # widget -1 (default) leaves the timeline's own window alone
+    tl, warn = resolve_render_window(with_window(), -1.0, -1.0)
+    assert warn is None
+    assert tl.render_in == 2.5 and tl.render_out == 8.0
+    # node input >= 0 overrides the timeline window
+    tl, warn = resolve_render_window(with_window(), 1.0, 5.0)
+    assert warn is None and tl.render_in == 1.0 and tl.render_out == 5.0
+    # open-ended window: render_in only
+    tl, warn = resolve_render_window(with_window(), 3.0, -1.0)
+    assert warn is None and tl.render_in == 3.0 and tl.render_out is None
+    # open-ended window: render_out only
+    tl, warn = resolve_render_window(with_window(), -1.0, 4.0)
+    assert warn is None and tl.render_in is None and tl.render_out == 4.0
+    # inverted window is rejected with a warning, timeline untouched
+    tl, warn = resolve_render_window(with_window(), 9.0, 3.0)
+    assert warn is not None and "OUT" in warn
+    assert tl.render_in == 2.5 and tl.render_out == 8.0
+    # None values behave like -1
+    tl, warn = resolve_render_window(with_window(), None, None)
+    assert warn is None and tl.render_in == 2.5 and tl.render_out == 8.0

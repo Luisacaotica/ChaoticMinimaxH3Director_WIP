@@ -236,6 +236,9 @@ class ChaoticDirectorEditor {
     this.chunkSecondsWidget = node.widgets.find(w => w.name === "chunk_seconds");
     this.continuityWidget = node.widgets.find(w => w.name === "continuity");
     this.videoContextWidget = node.widgets.find(w => w.name === "video_context");
+    this.renderInWidget = node.widgets.find(w => w.name === "render_in");
+    this.renderOutWidget = node.widgets.find(w => w.name === "render_out");
+    this.wireRenderWidgets();
 
     this.loadState();
     this.buildDOM();
@@ -260,6 +263,7 @@ class ChaoticDirectorEditor {
     let data = {};
     try { if (raw) data = JSON.parse(raw); } catch (e) { /* keep defaults */ }
     this._applyState(data);
+    this.syncRenderWidgets();
   }
 
   _applyState(raw) {
@@ -285,6 +289,33 @@ class ChaoticDirectorEditor {
     }
     this.state.shots.forEach(s => this.loadShotThumbs(s));
     this.state.refs.forEach(r => this.loadRefThumb(r));
+  }
+
+  /* the node's render_in / render_out inputs ARE the render window: the R key
+     writes into them, and typing in them moves the timeline window. */
+  wireRenderWidgets() {
+    const renderWidgetCb = which => v => {
+      const num = Number.isFinite(Number(v)) ? Number(v) : -1;
+      if (which === "in") this.renderIn = num >= 0 ? num : null;
+      else this.renderOut = num >= 0 ? num : null;
+      /* same rule as the R key: an inverted pair is cleared, not kept */
+      if (this.renderIn != null && this.renderOut != null && this.renderOut <= this.renderIn) {
+        this.renderIn = null;
+        this.renderOut = null;
+      }
+      this.commitChanges();
+    };
+    if (this.renderInWidget) this.renderInWidget.callback = renderWidgetCb("in");
+    if (this.renderOutWidget) this.renderOutWidget.callback = renderWidgetCb("out");
+  }
+
+  syncRenderWidgets() {
+    if (this.renderInWidget && this.renderInWidget.value !== (this.renderIn == null ? -1 : this.renderIn)) {
+      this.renderInWidget.value = this.renderIn == null ? -1 : this.renderIn;
+    }
+    if (this.renderOutWidget && this.renderOutWidget.value !== (this.renderOut == null ? -1 : this.renderOut)) {
+      this.renderOutWidget.value = this.renderOut == null ? -1 : this.renderOut;
+    }
   }
 
   fpsWidgetValue() {
@@ -1923,6 +1954,7 @@ class ChaoticDirectorEditor {
         this.renderOut = null;
         this.updateStatus("Render range cleared.");
       }
+      this.syncRenderWidgets();
       this.commitChanges();
       this.buildInspector();
     } else if (e.key === "+" || e.key === "=" || e.key === "-" || e.key === "_") {
@@ -3025,6 +3057,7 @@ class ChaoticDirectorEditor {
   clearRenderRange() {
     this.renderIn = null;
     this.renderOut = null;
+    this.syncRenderWidgets();
     this.commitChanges();
     this.updateStatus("Render window cleared — full timeline will render.");
   }

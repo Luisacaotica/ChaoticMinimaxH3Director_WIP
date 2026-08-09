@@ -55,6 +55,7 @@ from .timeline import (
     assign_global_tags,
     default_timeline_json,
     parse_timeline,
+    resolve_render_window,
     slice_timeline,
     timeline_issues,
 )
@@ -97,6 +98,10 @@ class ChaoticDirector:
                 "width": ("INT", {"default": 1344, "min": 32, "max": nodes.MAX_RESOLUTION, "step": 32}),
                 "height": ("INT", {"default": 768, "min": 32, "max": nodes.MAX_RESOLUTION, "step": 32}),
                 "fps": ("INT", {"default": 24, "min": 1, "max": 120}),
+                "render_in": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 86400.0, "step": 0.5,
+                    "tooltip": "Render window IN (seconds). -1 = use the timeline's R-key window, or the full timeline. The output video starts here and nothing outside the window is rendered."}),
+                "render_out": ("FLOAT", {"default": -1.0, "min": -1.0, "max": 86400.0, "step": 0.5,
+                    "tooltip": "Render window OUT (seconds). -1 = to the end of the timeline. Only [render_in, render_out) is rendered — chunks, refs and seams are planned inside this window only."}),
                 "chunk_mode": (["fixed", "auto"], {"default": "fixed"}),
                 "chunk_seconds": ("FLOAT", {"default": 5.0, "min": 0.5, "max": 60.0, "step": 0.5}),
                 "continuity": (
@@ -150,12 +155,18 @@ class ChaoticDirector:
         model, clip, vae, audio_vae,
         seed, steps, cfg, sampler_name, scheduler,
         width, height, fps,
+        render_in, render_out,
         chunk_mode, chunk_seconds, continuity, video_context, ref_image_size,
         timeline_data,
         sampler=None, sigmas=None, mockup=None,
     ):
         fps = max(1, min(120, int(fps)))
         timeline = parse_timeline(timeline_data)
+        # node-input render window (render_in / render_out widgets) overrides the
+        # timeline's R-key window when >= 0; -1 leaves the timeline window alone
+        timeline, window_warning = resolve_render_window(timeline, render_in, render_out)
+        if window_warning:
+            _log("WARNING: " + window_warning)
         if timeline.render_in is not None or timeline.render_out is not None:
             _log(
                 f"render window set: {timeline.render_in or 0.0:.2f}s → "
