@@ -72,6 +72,8 @@ def default_edit_dict() -> Dict[str, Any]:
             "feather": 8,
             "align_x": 0.5,
             "align_y": 0.5,
+            "scale": 1.0,       # source window size multiplier (0.1..4)
+            "rotation": 0.0,    # source window rotation in degrees (-180..180)
         },
         "refs": [],            # copy-to-reference crops: [{"src": b64png, "at": sec}]
         "video_fps": None,     # the source file's real framerate (widget estimate)
@@ -147,6 +149,8 @@ def parse_edit_data(json_text: str) -> Dict[str, Any]:
             "feather": max(0, min(64, int(_as_float(raw_rf.get("feather"), 8)))),
             "align_x": min(1.0, max(0.0, _as_float(raw_rf.get("align_x"), 0.5))),
             "align_y": min(1.0, max(0.0, _as_float(raw_rf.get("align_y"), 0.5))),
+            "scale": min(4.0, max(0.1, _as_float(raw_rf.get("scale"), 1.0))),
+            "rotation": min(180.0, max(-180.0, _as_float(raw_rf.get("rotation"), 0.0))),
         }
     raw_refs = data.get("refs")
     if isinstance(raw_refs, list):
@@ -357,32 +361,112 @@ def reframe_plate(
     feather = max(0, int(reframe["feather"]))
     ax = min(1.0, max(0.0, float(reframe["align_x"])))
     ay = min(1.0, max(0.0, float(reframe["align_y"])))
+    scale = min(4.0, max(0.1, float(reframe.get("scale") or 1.0)))
+    rot_deg = min(180.0, max(-180.0, float(reframe.get("rotation") or 0.0)))
 
+    # window geometry: contain-fit the source, then multiply by `scale`.  A
+    # window that fits keeps its old fully-inside clamp; one that outgrows the
+    # canvas (scale > 1) pins its CENTER inside instead, so the view stays
+    # anchored while it overflows the edges.
     s = min(tw / W, th / H)  # contain-fit the source
-    sw, sh = max(1, int(round(W * s))), max(1, int(round(H * s)))
+    k = s * scale
+    sw, sh = max(1, int(round(W * k))), max(1, int(round(H * k)))
     sx = int(round((tw - sw) * ax))
     sy = int(round((th - sh) * ay))
-    # clamp so the window always stays inside the canvas
-    sx = min(max(0, sx), max(0, tw - sw))
-    sy = min(max(0, sy), max(0, th - sh))
+    if sw <= tw:
+        sx = min(max(0, sx), tw - sw)
+    else:
+        sx = min(max(0, sx + sw // 2), tw) - sw // 2
+    if sh <= th:
+        sy = min(max(0, sy), th - sh)
+    else:
+        sy = min(max(0, sy + sh // 2), th) - sh // 2
+    cx = sx + sw / 2.0
+    cy = sy + sh / 2.0
 
     void = torch.tensor(color, dtype=video.dtype, device=video.device).reshape(1, 1, 1, 3)
     plate = void.expand(F, th, tw, 3).clone()
-    src = _resize(video, sh, sw)
-    plate[:, sy:sy + sh, sx:sx + sw, :] = src
 
-    # outside-of-window mask: 1 = outpaint region, 0 = keep
-    eff = torch.ones(F, th, tw, dtype=video.dtype, device=video.device)
-    eff[:, sy:sy + sh, sx:sx + sw] = 0.0
+    if abs(rot_deg) < 1e-6:
+        # axis-aligned fast path (identity or pure scale) — exact slicing, and
+        # bounds-safe so a scaled-up window that overflows the canvas clips
+        # cleanly instead of wrapping via negative indices
+        src = _resize(video, sh, sw)
+        if sx < tw and sy < th and sx + sw > 0 and sy + sh > 0:
+            x0 = max(0, sx); y0 = max(0, sy)
+            x1 = min(tw, sx + sw); y1 = min(th, sy + sh)
+            plate[:, y0:y1, x0:x1, :] = src[:, y0 - sy:y1 - sy, x0 - sx:x1 - sx, :]
+        eff = torch.ones(F, th, tw, dtype=video.dtype, device=video.device)
+        if sx < tw and sy < th and sx + sw > 0 and sy + sh > 0:
+            x0 = max(0, sx); y0 = max(0, sy)
+            eff[:, y0:min(th, sy + sh), x0:min(tw, sx + sw)] = 0.0
+        if preserve is not None:
+            p = preserve.float()[:F]  # truncate if longer; shorter stays and is skipped
+            if p.shape[0] == F:
+                p_resized = _resize(p.unsqueeze(-1), sh, sw)[..., 0]
+                placed = torch.zeros(F, th, tw, dtype=video.dtype, device=video.device)
+                if sx < tw and sy < th and sx + sw > 0 and sy + sh > 0:
+                    x0 = max(0, sx); y0 = max(0, sy)
+                    placed[:, y0:min(th, sy + sh), x0:min(tw, sx + sw)] = (
+                        p_resized[:, y0 - sy:min(th, sy + sh) - sy, x0 - sx:min(tw, sx + sw) - sx]
+                    )
+                eff = eff * (1.0 - placed.clamp(0, 1))  # painted = preserved
+        eff = _feather_mask(eff, feather)
+        return plate, eff, (sx, sy, sw, sh)
+
+    # rotated path: affine warp of the source into the target canvas.  The grid
+    # maps each target pixel back to its source coordinate (inverse rotate,
+    # unscale, translate), so grid_sample picks the right source color.
+    import torch.nn.functional as F_nn  # noqa: PLC0415
+
+    theta = math.radians(rot_deg)
+    cos_t, sin_t = math.cos(theta), math.sin(theta)
+    dev = video.device
+
+    ty, tx = torch.meshgrid(torch.arange(th), torch.arange(tw), indexing="ij")
+    dx = (tx.to(dev) - cx) / k
+    dy = (ty.to(dev) - cy) / k
+    rx = dx * cos_t + dy * sin_t  # R(-theta) on the target offset
+    ry = -dx * sin_t + dy * cos_t
+    sx_ = rx + W / 2.0
+    sy_ = ry + H / 2.0
+    gx = sx_ / max(1, W - 1) * 2.0 - 1.0
+    gy = sy_ / max(1, H - 1) * 2.0 - 1.0
+    grid = torch.stack([gx, gy], dim=-1).unsqueeze(0).to(video.dtype).expand(F, -1, -1, -1)
+
+    video_n = video.permute(0, 3, 1, 2)
+    plate = F_nn.grid_sample(
+        video_n, grid, mode="bilinear", padding_mode="zeros", align_corners=True
+    ).permute(0, 2, 3, 1)
+
+    # coverage mask: sampling a constant-1 source through the same warp gives
+    # the soft footprint (anti-aliased edges); outside = the outpaint region
+    ones = torch.ones(F, 1, H, W, dtype=video.dtype, device=dev)
+    cov = F_nn.grid_sample(ones, grid, mode="bilinear", padding_mode="zeros", align_corners=True)[:, 0]
+    eff = (1.0 - cov).clamp(0, 1)
+
     if preserve is not None:
-        p = preserve.float()[:F]  # truncate if longer; shorter stays and is skipped
+        p = preserve.float()[:F]
         if p.shape[0] == F:
-            p_resized = _resize(p.unsqueeze(-1), sh, sw)[..., 0]
-            placed = torch.zeros(F, th, tw, dtype=video.dtype, device=video.device)
-            placed[:, sy:sy + sh, sx:sx + sw] = p_resized
-            eff = eff * (1.0 - placed.clamp(0, 1))  # painted = preserved
+            placed = F_nn.grid_sample(
+                p.unsqueeze(1), grid, mode="bilinear", padding_mode="zeros", align_corners=True
+            )[:, 0]
+            eff = eff * (1.0 - placed.clamp(0, 1))
+
     eff = _feather_mask(eff, feather)
-    return plate, eff, (sx, sy, sw, sh)
+
+    # axis-aligned box of the rotated window, clipped to the canvas
+    hw, hh = sw / 2.0, sh / 2.0
+    xs, ys = [], []
+    for lx, ly in ((hw, hh), (hw, -hh), (-hw, hh), (-hw, -hh)):
+        xs.append(cx + lx * cos_t - ly * sin_t)
+        ys.append(cy + lx * sin_t + ly * cos_t)
+    x0 = int(round(max(0.0, min(xs))))
+    y0 = int(round(max(0.0, min(ys))))
+    x1 = int(round(min(float(tw), max(xs))))
+    y1 = int(round(min(float(th), max(ys))))
+    box = (x0, y0, max(1, x1 - x0), max(1, y1 - y0))
+    return plate, eff, box
 
 
 def decode_refs(refs: List[Dict[str, Any]]) -> List[torch.Tensor]:

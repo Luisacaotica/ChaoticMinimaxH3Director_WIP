@@ -298,7 +298,7 @@ class ChaoticVideoEdit {
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
       mask: { type: "rect", keys: [] },
       chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
-      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5 },
+      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0 },
       refs: [],
       video_fps: null,
     };
@@ -346,7 +346,7 @@ class ChaoticVideoEdit {
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
       mask: { type: "rect", keys: [] },
       chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
-      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5 },
+      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0 },
       refs: [],
       video_fps: null }));
   }
@@ -388,6 +388,8 @@ class ChaoticVideoEdit {
       feather: Math.max(0, Math.min(64, parseInt(rawRf.feather, 10) || 8)),
       align_x: veClamp(Number(rawRf.align_x) || 0.5, 0, 1),
       align_y: veClamp(Number(rawRf.align_y) || 0.5, 0, 1),
+      scale: veClamp(Number(rawRf.scale) || 1, 0.1, 4),
+      rotation: veClamp(Number(rawRf.rotation) || 0, -180, 180),
     };
     this.state.refs = Array.isArray(raw.refs)
       ? raw.refs.filter(r => r && typeof r.src === "string" && r.src)
@@ -791,6 +793,51 @@ class ChaoticVideoEdit {
     });
     this.reframePanel.appendChild(alignRow);
 
+    /* window transform: size + rotation (the move tool's ✥ handles drag these) */
+    const xformRow = document.createElement("div");
+    xformRow.className = "ve-row";
+    xformRow.appendChild(this.btnL("Size"));
+    const rfScaleIn = document.createElement("input");
+    rfScaleIn.className = "ve-range"; rfScaleIn.type = "range"; rfScaleIn.min = "0.1"; rfScaleIn.max = "4"; rfScaleIn.step = "0.01";
+    rfScaleIn.value = String(this.state.reframe.scale);
+    rfScaleIn.style.flex = "0 0 64px";
+    rfScaleIn.addEventListener("input", () => { this.state.reframe.scale = veClamp(Number(rfScaleIn.value), 0.1, 4); this.refreshReframeUI(); this.drawPreview(); this.commitChanges(); });
+    const rfScaleLbl = document.createElement("span");
+    rfScaleLbl.style.font = "10px ui-monospace, monospace";
+    rfScaleLbl.style.color = "#9fb6c9";
+    rfScaleLbl.style.minWidth = "44px";
+    rfScaleLbl.style.textAlign = "right";
+    xformRow.appendChild(rfScaleIn);
+    xformRow.appendChild(rfScaleLbl);
+    const scaleReset = this.btn("1×", () => { this.state.reframe.scale = 1; this.refreshReframeUI(); this.drawPreview(); this.commitChanges(); });
+    scaleReset.title = "reset size to 100%";
+    xformRow.appendChild(scaleReset);
+    this._rfScaleIn = rfScaleIn;
+    this._rfScaleLbl = rfScaleLbl;
+    this.reframePanel.appendChild(xformRow);
+
+    const rotRow = document.createElement("div");
+    rotRow.className = "ve-row";
+    rotRow.appendChild(this.btnL("Rotate"));
+    const rfRotIn = document.createElement("input");
+    rfRotIn.className = "ve-range"; rfRotIn.type = "range"; rfRotIn.min = "-180"; rfRotIn.max = "180"; rfRotIn.step = "1";
+    rfRotIn.value = String(this.state.reframe.rotation);
+    rfRotIn.style.flex = "0 0 64px";
+    rfRotIn.addEventListener("input", () => { this.state.reframe.rotation = veClamp(Number(rfRotIn.value), -180, 180); this.refreshReframeUI(); this.drawPreview(); this.commitChanges(); });
+    const rfRotLbl = document.createElement("span");
+    rfRotLbl.style.font = "10px ui-monospace, monospace";
+    rfRotLbl.style.color = "#9fb6c9";
+    rfRotLbl.style.minWidth = "44px";
+    rfRotLbl.style.textAlign = "right";
+    rotRow.appendChild(rfRotIn);
+    rotRow.appendChild(rfRotLbl);
+    const rotReset = this.btn("0°", () => { this.state.reframe.rotation = 0; this.refreshReframeUI(); this.drawPreview(); this.commitChanges(); });
+    rotReset.title = "reset rotation to 0°";
+    rotRow.appendChild(rotReset);
+    this._rfRotIn = rfRotIn;
+    this._rfRotLbl = rfRotLbl;
+    this.reframePanel.appendChild(rotRow);
+
     /* auto-preserve: detect edge-crossing objects, write preserve strokes */
     const autoRow = document.createElement("div");
     autoRow.className = "ve-row";
@@ -827,7 +874,7 @@ class ChaoticVideoEdit {
     const rfHint = document.createElement("div");
     rfHint.className = "ve-hint";
     rfHint.style.position = "static";
-    rfHint.textContent = "the source fits inside the target window; the dimmed outside is the outpaint region. Brush strokes = preserve (people/objects crossing the edge stay intact).";
+    rfHint.textContent = "the source fits inside the target window; the dimmed outside is the outpaint region. ✥ Move window: drag to place, the ⬤ knob rotates (Shift = 15°), the ◼ knob scales (0.1×–4×). Brush strokes = preserve (people/objects crossing the edge stay intact).";
     this.reframePanel.appendChild(rfHint);
     this.wrapper.appendChild(this.reframePanel);
     this.refreshReframeUI();
@@ -1367,7 +1414,16 @@ class ChaoticVideoEdit {
 
   onCanvasMove(e) {
     if (this._dragWin) { this.moveWindowDrag(e); return; }
-    if (!this._drawing) return;
+    if (!this._drawing) {
+      /* hover feedback for the move tool's rotate/scale handles */
+      if (this.state.mode === "reframe" && this._rfTool === "move" && this.canvas) {
+        const [W, H] = this.canvasSize();
+        const rect = this.canvas.getBoundingClientRect();
+        const h = this.reframeHandleAt(e.clientX - rect.left, e.clientY - rect.top, W, H);
+        this.canvas.style.cursor = h === "rotate" ? "grab" : h === "scale" ? "nwse-resize" : "move";
+      }
+      return;
+    }
     const p = this.mouseToNorm(e);
     this._lastNorm = p;
     if (this._tool === "rect") {
@@ -1401,6 +1457,11 @@ class ChaoticVideoEdit {
   }
 
   paintBrush(p) {
+    if (this.state.mode === "reframe") {
+      const s = this.reframeCanvasToSource(p.x, p.y);
+      if (!s) return;   // strokes in the void (outside the source) are ignored
+      p = s;
+    }
     const radius = Math.max(1, Math.round(0.03 * this._gridW));
     const cx = Math.round(p.x * (this._gridW - 1));
     const cy = Math.round(p.y * (this._gridH - 1));
@@ -1419,10 +1480,16 @@ class ChaoticVideoEdit {
     /* rect is filled on mouseup using the last known cursor position */
     const p = this._lastNorm;
     if (!p || !this._rectAnchor) return;
-    const ax = Math.round(Math.min(this._rectAnchor.x, p.x) * (this._gridW - 1));
-    const bx = Math.round(Math.max(this._rectAnchor.x, p.x) * (this._gridW - 1));
-    const ay = Math.round(Math.min(this._rectAnchor.y, p.y) * (this._gridH - 1));
-    const by = Math.round(Math.max(this._rectAnchor.y, p.y) * (this._gridH - 1));
+    let a = this._rectAnchor, b = p;
+    if (this.state.mode === "reframe") {
+      a = this.reframeCanvasToSource(a.x, a.y);
+      b = this.reframeCanvasToSource(b.x, b.y);
+      if (!a || !b) return;   // a selection in the void selects nothing
+    }
+    const ax = Math.round(Math.min(a.x, b.x) * (this._gridW - 1));
+    const bx = Math.round(Math.max(a.x, b.x) * (this._gridW - 1));
+    const ay = Math.round(Math.min(a.y, b.y) * (this._gridH - 1));
+    const by = Math.round(Math.max(a.y, b.y) * (this._gridH - 1));
     for (let y = ay; y <= by; y++) {
       for (let x = ax; x <= bx; x++) {
         this._workMask[y * this._gridW + x] = 255;
@@ -1471,11 +1538,15 @@ class ChaoticVideoEdit {
     const overlay = new Uint8ClampedArray(W * H);
     const gw = this._gridW, gh = this._gridH;
     const vw = this.videoEl.videoWidth || W, vh = this.videoEl.videoHeight || H;
-    let ox, oy, pxPerGridX, pxPerGridY;
+    let ox, oy, pxPerGridX, pxPerGridY, affine = null;
     if (this.state.mode === "reframe") {
       const w = this.reframeWindow(W, H);
-      ox = w.sx; oy = w.sy;
-      pxPerGridX = w.sw / gw; pxPerGridY = w.sh / gh;
+      if (Math.abs(w.rot) > 1e-4 || Math.abs(w.scale - 1) > 1e-4) {
+        affine = true;   // rotated/scaled: per-pixel inverse mapping below
+      } else {
+        ox = w.sx; oy = w.sy;
+        pxPerGridX = w.sw / gw; pxPerGridY = w.sh / gh;
+      }
     } else {
       const s = Math.min(W / vw, H / vh);
       ox = (W - vw * s) / 2; oy = (H - vh * s) / 2;
@@ -1483,8 +1554,16 @@ class ChaoticVideoEdit {
     }
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
-        const gx = Math.floor((x - ox) / pxPerGridX);
-        const gy = Math.floor((y - oy) / pxPerGridY);
+        let gx, gy;
+        if (affine) {
+          const s = this.reframeCanvasToSource(x / W, y / H);
+          if (!s) continue;
+          gx = Math.floor(s.x * (gw - 1));
+          gy = Math.floor(s.y * (gh - 1));
+        } else {
+          gx = Math.floor((x - ox) / pxPerGridX);
+          gy = Math.floor((y - oy) / pxPerGridY);
+        }
         if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) continue;
         let v = 0;
         if (interp) v = interp.data[gy * gw + gx];
@@ -1703,6 +1782,12 @@ class ChaoticVideoEdit {
       Object.keys(this.alignBtns.align_x).forEach(k => this.alignBtns.align_x[k].classList.toggle("active", Number(k) === rf.align_x));
       Object.keys(this.alignBtns.align_y).forEach(k => this.alignBtns.align_y[k].classList.toggle("active", Number(k) === rf.align_y));
     }
+    const scale = veClamp(Number(rf.scale) || 1, 0.1, 4);
+    const rotation = veClamp(Number(rf.rotation) || 0, -180, 180);
+    if (this._rfScaleIn) this._rfScaleIn.value = String(scale);
+    if (this._rfScaleLbl) this._rfScaleLbl.textContent = "×" + scale.toFixed(2);
+    if (this._rfRotIn) this._rfRotIn.value = String(rotation);
+    if (this._rfRotLbl) this._rfRotLbl.textContent = rotation + "°";
   }
 
   setRfTool(t) {
@@ -1719,7 +1804,17 @@ class ChaoticVideoEdit {
     const rect = this.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
-    this._dragWin = { grabDX: mx - w.sx, grabDY: my - w.sy, wx: w.wx, wy: w.wy, ww: w.ww, wh: w.wh, sw: w.sw, sh: w.sh };
+    const handle = this.reframeHandleAt(mx, my, W, H);
+    if (handle === "rotate") {
+      const ang = Math.atan2(my - w.cy, mx - w.cx) * 180 / Math.PI;
+      this._dragWin = { mode: "rotate", cx: w.cx, cy: w.cy, ang0: ang, rot0: veClamp(Number(this.state.reframe.rotation) || 0, -180, 180) };
+    } else if (handle === "scale") {
+      const d0 = Math.max(1, Math.hypot(mx - w.cx, my - w.cy));
+      this._dragWin = { mode: "scale", cx: w.cx, cy: w.cy, d0, scale0: veClamp(Number(this.state.reframe.scale) || 1, 0.1, 4) };
+    } else {
+      this._dragWin = { mode: "move", grabDX: mx - w.sx, grabDY: my - w.sy, wx: w.wx, wy: w.wy, ww: w.ww, wh: w.wh, sw: w.sw, sh: w.sh };
+    }
+    if (this.canvas) this.canvas.style.cursor = handle === "rotate" ? "grab" : handle === "scale" ? "nwse-resize" : "move";
   }
 
   moveWindowDrag(e) {
@@ -1729,12 +1824,22 @@ class ChaoticVideoEdit {
     const my = e.clientY - rect.top;
     const d = this._dragWin;
     const rf = this.state.reframe;
-    /* only write an axis that actually has travel — a contain-fit source fills
-       one axis, and writing there would scribble meaningless fractions */
-    const availW = d.ww - d.sw;
-    const availH = d.wh - d.sh;
-    if (availW > 1) rf.align_x = veClamp((mx - d.grabDX - d.wx) / availW, 0, 1);
-    if (availH > 1) rf.align_y = veClamp((my - d.grabDY - d.wy) / availH, 0, 1);
+    if (d.mode === "rotate") {
+      const ang = Math.atan2(my - d.cy, mx - d.cx) * 180 / Math.PI;
+      let r = d.rot0 + (ang - d.ang0);
+      if (e.shiftKey) r = Math.round(r / 15) * 15;  // shift snaps to 15°
+      rf.rotation = veClamp(r, -180, 180);
+    } else if (d.mode === "scale") {
+      const dist = Math.hypot(mx - d.cx, my - d.cy);
+      rf.scale = veClamp(d.scale0 * (dist / d.d0), 0.1, 4);
+    } else {
+      /* only write an axis that actually has travel — a contain-fit source fills
+         one axis, and writing there would scribble meaningless fractions */
+      const availW = d.ww - d.sw;
+      const availH = d.wh - d.sh;
+      if (availW > 1) rf.align_x = veClamp((mx - d.grabDX - d.wx) / availW, 0, 1);
+      if (availH > 1) rf.align_y = veClamp((my - d.grabDY - d.wy) / availH, 0, 1);
+    }
     this.drawPreview();
   }
 
@@ -1743,7 +1848,8 @@ class ChaoticVideoEdit {
     this.commitChanges();
   }
 
-  /* reframe target window in preview coords (mirrors reframe_plate: contain + align) */
+  /* reframe target window in preview coords (mirrors reframe_plate: contain
+     + align + scale; rotation rotates the source around its center) */
   reframeWindow(W, H) {
     const rf = this.state.reframe;
     const tw = Math.max(1, rf.target_w), th = Math.max(1, rf.target_h);
@@ -1752,38 +1858,141 @@ class ChaoticVideoEdit {
     const wx = (W - ww) / 2, wy = (H - wh) / 2;
     const vw = (this.videoEl && this.videoEl.videoWidth) || W;
     const vh = (this.videoEl && this.videoEl.videoHeight) || H;
-    const sv = Math.min(ww / vw, wh / vh);
-    const sw = vw * sv, sh = vh * sv;
-    const sx = wx + (ww - sw) * (rf.align_x || 0.5);
-    const sy = wy + (wh - sh) * (rf.align_y || 0.5);
-    return { wx, wy, ww, wh, sx, sy, sw, sh };
+    const scale = veClamp(Number(rf.scale) || 1, 0.1, 4);
+    const rot = veClamp(Number(rf.rotation) || 0, -180, 180) * Math.PI / 180;
+    const k = Math.min(ww / vw, wh / vh) * scale;
+    const sw = vw * k, sh = vh * k;
+    let sx = wx + (ww - sw) * (rf.align_x || 0.5);
+    let sy = wy + (wh - sh) * (rf.align_y || 0.5);
+    /* fitting window keeps its fully-inside clamp; an oversized one pins its
+       center inside the target so the view stays anchored while it overflows */
+    if (sw <= ww) sx = veClamp(sx, wx, wx + ww - sw);
+    else { const cxx = veClamp(sx + sw / 2, wx, wx + ww); sx = cxx - sw / 2; }
+    if (sh <= wh) sy = veClamp(sy, wy, wy + wh - sh);
+    else { const cyy = veClamp(sy + sh / 2, wy, wy + wh); sy = cyy - sh / 2; }
+    return { wx, wy, ww, wh, sx, sy, sw, sh, cx: sx + sw / 2, cy: sy + sh / 2, k, rot, scale };
+  }
+
+  /* canvas-normalized point -> source-normalized point through the (scaled +
+     rotated) window transform; null when the point is outside the source */
+  reframeCanvasToSource(nx, ny) {
+    const [W, H] = this.canvasSize();
+    const w = this.reframeWindow(W, H);
+    const vw = (this.videoEl && this.videoEl.videoWidth) || W;
+    const vh = (this.videoEl && this.videoEl.videoHeight) || H;
+    const x = nx * W - w.cx, y = ny * H - w.cy;
+    const cos = Math.cos(w.rot), sin = Math.sin(w.rot);
+    const rx = (x * cos + y * sin) / w.k;   // inverse rotate + unscale
+    const ry = (-x * sin + y * cos) / w.k;
+    const sx = rx + vw / 2, sy = ry + vh / 2;
+    if (sx < 0 || sy < 0 || sx > vw || sy > vh) return null;
+    return { x: veClamp(sx / vw, 0, 1), y: veClamp(sy / vh, 0, 1) };
+  }
+
+  /* like reframeCanvasToSource but clamps into [0,1] instead of returning null
+     — for copy-to-reference, where a selection straddling the window edge
+     should snap to the source bounds rather than abort */
+  reframeCanvasToSourceClamped(nx, ny) {
+    const [W, H] = this.canvasSize();
+    const w = this.reframeWindow(W, H);
+    const vw = (this.videoEl && this.videoEl.videoWidth) || W;
+    const vh = (this.videoEl && this.videoEl.videoHeight) || H;
+    const x = nx * W - w.cx, y = ny * H - w.cy;
+    const cos = Math.cos(w.rot), sin = Math.sin(w.rot);
+    const rx = (x * cos + y * sin) / w.k;
+    const ry = (-x * sin + y * cos) / w.k;
+    return { x: veClamp((rx + vw / 2) / vw, 0, 1), y: veClamp((ry + vh / 2) / vh, 0, 1) };
+  }
+
+  /* move-tool handle positions: the rotate knob floats 16px above the window's
+     top edge (rotated with it), the scale knob sits on the bottom-right corner */
+  reframeHandles(W, H) {
+    const w = this.reframeWindow(W, H);
+    const cos = Math.cos(w.rot), sin = Math.sin(w.rot);
+    const rx = w.sw / 2, ry = w.sh / 2;
+    /* top-center of the rotated window extended outward by the knob radius */
+    const rotX = w.cx + (ry + 14) * sin;
+    const rotY = w.cy - (ry + 14) * cos;
+    /* bottom-right corner of the rotated window */
+    const sclX = w.cx + rx * cos - ry * sin;
+    const sclY = w.cy + rx * sin + ry * cos;
+    return { rot: { x: rotX, y: rotY }, scale: { x: sclX, y: sclY } };
+  }
+
+  /* hit-test the move-tool handles */
+  reframeHandleAt(mx, my, W, H) {
+    const w = this.reframeWindow(W, H);
+    const h = this.reframeHandles(W, H);
+    if (Math.hypot(mx - h.rot.x, my - h.rot.y) <= 12) return "rotate";
+    if (Math.hypot(mx - h.scale.x, my - h.scale.y) <= 12) return "scale";
+    if (mx >= w.sx - 4 && mx <= w.sx + w.sw + 4 && my >= w.sy - 4 && my <= w.sy + w.sh + 4) return "move";
+    return null;
   }
 
   drawReframeFraming(W, H) {
     const w = this.reframeWindow(W, H);
     const ctx = this.ctx;
     ctx.save();
-    /* dim the outpaint region */
+    /* dim the outpaint region (outside the target window) */
     ctx.fillStyle = "rgba(8,10,12,0.72)";
     ctx.fillRect(0, 0, W, w.wy);
     ctx.fillRect(0, w.wy + w.wh, W, H - w.wy - w.wh);
     ctx.fillRect(0, w.wy, w.wx, w.wh);
     ctx.fillRect(w.wx + w.ww, w.wy, W - w.wx - w.ww, w.wh);
-    /* source video placed inside the window */
+    /* source video placed inside the window, rotated around its center */
     if (this.videoEl && this.videoEl.src && this.videoEl.readyState >= 1) {
-      ctx.drawImage(this.videoEl, w.sx, w.sy, w.sw, w.sh);
+      ctx.save();
+      ctx.translate(w.cx, w.cy);
+      ctx.rotate(w.rot);
+      ctx.drawImage(this.videoEl, -w.sw / 2, -w.sh / 2, w.sw, w.sh);
+      ctx.restore();
     }
-    /* window border + label */
-    ctx.setLineDash([5, 4]);
+    /* source window border (solid, rotated with the video) */
+    ctx.save();
+    ctx.translate(w.cx, w.cy);
+    ctx.rotate(w.rot);
     ctx.strokeStyle = "#7ee2a8";
     ctx.lineWidth = 1.5;
+    ctx.strokeRect(-w.sw / 2, -w.sh / 2, w.sw, w.sh);
+    ctx.restore();
+    /* target window border (dashed) */
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = "#9fb6c9";
+    ctx.lineWidth = 1.25;
     ctx.strokeRect(w.wx, w.wy, w.ww, w.wh);
     ctx.setLineDash([]);
+    /* move tool: rotate + scale handles on the source window */
+    if (this._rfTool === "move") {
+      const h = this.reframeHandles(W, H);
+      /* rotate knob: line up the window's top edge + circle */
+      ctx.strokeStyle = "#ffb454";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(w.cx + w.sh / 2 * Math.sin(w.rot), w.cy - w.sh / 2 * Math.cos(w.rot));
+      ctx.lineTo(h.rot.x, h.rot.y);
+      ctx.stroke();
+      ctx.fillStyle = "#ffb454";
+      ctx.beginPath();
+      ctx.arc(h.rot.x, h.rot.y, 5, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = "#14171a";
+      ctx.lineWidth = 1;
+      ctx.stroke();
+      /* scale knob: square on the bottom-right corner */
+      ctx.fillStyle = "#59c2ff";
+      ctx.fillRect(h.scale.x - 5, h.scale.y - 5, 10, 10);
+      ctx.strokeStyle = "#14171a";
+      ctx.strokeRect(h.scale.x - 5, h.scale.y - 5, 10, 10);
+    }
+    /* label */
     ctx.fillStyle = "#7ee2a8";
     ctx.font = "10px ui-monospace, monospace";
     ctx.textAlign = "left";
     ctx.textBaseline = "top";
-    ctx.fillText("reframe " + this.state.reframe.target_w + "×" + this.state.reframe.target_h + " — outside = outpaint", w.wx + 4, w.wy + 4);
+    ctx.fillText(
+      "reframe " + this.state.reframe.target_w + "×" + this.state.reframe.target_h +
+      " · ×" + w.scale.toFixed(2) + " · " + Math.round(veClamp(Number(this.state.reframe.rotation) || 0, -180, 180)) + "° — outside = outpaint",
+      w.wx + 4, w.wy + 4);
     ctx.restore();
   }
 
@@ -1890,10 +2099,20 @@ class ChaoticVideoEdit {
     }
     try {
       const vw = this.videoEl.videoWidth, vh = this.videoEl.videoHeight;
-      const x0 = Math.max(0, Math.round(this._selRect.x0 * vw));
-      const y0 = Math.max(0, Math.round(this._selRect.y0 * vh));
-      const x1 = Math.min(vw, Math.round(this._selRect.x1 * vw));
-      const y1 = Math.min(vh, Math.round(this._selRect.y1 * vh));
+      let rx0 = this._selRect.x0, ry0 = this._selRect.y0, rx1 = this._selRect.x1, ry1 = this._selRect.y1;
+      if (this.state.mode === "reframe") {
+        /* the selection is drawn in canvas space — map it back to source
+           space through the (scaled + rotated) window so the crop is exact;
+           corners outside the window snap to the source bounds */
+        const a = this.reframeCanvasToSourceClamped(rx0, ry0);
+        const b = this.reframeCanvasToSourceClamped(rx1, ry1);
+        rx0 = Math.min(a.x, b.x); ry0 = Math.min(a.y, b.y);
+        rx1 = Math.max(a.x, b.x); ry1 = Math.max(a.y, b.y);
+      }
+      const x0 = Math.max(0, Math.round(rx0 * vw));
+      const y0 = Math.max(0, Math.round(ry0 * vh));
+      const x1 = Math.min(vw, Math.round(rx1 * vw));
+      const y1 = Math.min(vh, Math.round(ry1 * vh));
       if (x1 - x0 < 4 || y1 - y0 < 4) {
         this.updateStatus("Selection too small for a reference.");
         return;

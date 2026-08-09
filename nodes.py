@@ -477,6 +477,8 @@ class ChaoticH3VideoEdit:
                 "feather": edit["reframe"]["feather"],
                 "align_x": edit["reframe"]["align_x"],
                 "align_y": edit["reframe"]["align_y"],
+                "scale": edit["reframe"]["scale"],
+                "rotation": edit["reframe"]["rotation"],
                 "source_box": list(box),
                 "note": (
                     "reframed canvas — outpaint the outside window (mask=1). "

@@ -447,14 +447,20 @@ function check(name, cond, extra) {
   check("setReframeTarget/Align commit without throwing", rfThrew === null && ed.state.reframe.target_w === 720 && ed.state.reframe.align_x === 0, rfThrew ? rfThrew.message : "");
   check("reframe serializes", JSON.parse(ed.serialize()).reframe.target_w === 720);
 
-  /* reframe preserve brush (painting must work in reframe mode) */
+  /* reframe preserve brush (painting must work in reframe mode, mapped through
+     the window — strokes in the void are ignored) */
   ed.playhead = 0.5;
-  ed.onCanvasDown({ clientX: 120, clientY: 80 });
-  ed.onCanvasMove({ clientX: 130, clientY: 90 });
-  ed.onCanvasMove({ clientX: 150, clientY: 100 });
+  ed.onCanvasDown({ clientX: 300, clientY: 200 });
+  ed.onCanvasMove({ clientX: 310, clientY: 210 });
+  ed.onCanvasMove({ clientX: 330, clientY: 220 });
   ed.onCanvasUp();
   const rfPainted = Array.from(ed._workMask || []).filter(v => v === 255).length;
-  check("reframe brush paints preserve strokes", rfPainted > 0, "painted=" + rfPainted);
+  check("reframe brush paints preserve strokes inside the window", rfPainted > 0, "painted=" + rfPainted);
+  ed._workMask = new Uint8ClampedArray(ed._gridW * ed._gridH);
+  ed.onCanvasDown({ clientX: 12, clientY: 12 });
+  ed.onCanvasUp();
+  const rfVoid = Array.from(ed._workMask || []).filter(v => v === 255).length;
+  check("reframe brush ignores strokes in the void", rfVoid === 0, "painted=" + rfVoid);
 
   /* free-drag the source window (move tool) — target 720x1280, mock video 1280x720
      => vertical letterbox, only align_y has room to travel */
@@ -468,6 +474,82 @@ function check(name, cond, extra) {
   check("flush axis is never scribbled", ed.state.reframe.align_x === 0, "ax=" + ed.state.reframe.align_x);
   ed.onCanvasUp();
   check("window drag commits on release", JSON.parse(ed.serialize()).reframe.align_y === 1);
+
+  /* rotate + scale handles on the move tool (canvas 800x450, target 720x1280,
+     source window 253x142 -> reset to centered, handles at (400,140) and
+     (527,296)) */
+  ed.setRfTool("move");
+  ed.state.reframe.align_x = 0.5;
+  ed.state.reframe.align_y = 0.5;
+  check("rotate handle hit-tests above the window", ed.reframeHandleAt(400, 140, 800, 450) === "rotate", "h=" + ed.reframeHandleAt(400, 140, 800, 450));
+  check("scale handle hit-tests on the corner", ed.reframeHandleAt(527, 296, 800, 450) === "scale", "h=" + ed.reframeHandleAt(527, 296, 800, 450));
+  check("window body hit-tests as move", ed.reframeHandleAt(450, 220, 800, 450) === "move", "h=" + ed.reframeHandleAt(450, 220, 800, 450));
+
+  ed.state.reframe.scale = 2; ed.state.reframe.rotation = 0;
+  const w2 = ed.reframeWindow(800, 450);
+  check("scale 2× doubles the source window", Math.abs(w2.sw - 506.25) < 2 && Math.abs(w2.sh - 284.76) < 2, "sw=" + w2.sw.toFixed(1));
+  ed.state.reframe.scale = 1; ed.state.reframe.rotation = 45;
+  check("rotation lands in the window geometry", Math.abs(ed.reframeWindow(800, 450).rot - Math.PI / 4) < 1e-6);
+  ed.state.reframe.rotation = 0;
+
+  const srcMid = ed.reframeCanvasToSource(0.5, 0.5);  // the window center
+  check("canvasToSource maps the window center to source center", !!srcMid && Math.abs(srcMid.x - 0.5) < 0.05 && Math.abs(srcMid.y - 0.5) < 0.05, JSON.stringify(srcMid));
+  check("canvasToSource returns null in the void", ed.reframeCanvasToSource(0.02, 0.02) === null);
+
+  /* JS window geometry must equal the Python plate box, scaled by the canvas
+     display factor (WYSIWYG proof): independent port of reframe_plate's box */
+  const TW = 720, TH = 1280, VW = 1280, VH = 720;
+  const dispS = Math.min(800 / TW, 450 / TH);
+  const pyBox = (scale, ax, ay) => {
+    const k = Math.min(TW / VW, TH / VH) * scale;
+    const sw = Math.max(1, Math.round(VW * k)), sh = Math.max(1, Math.round(VH * k));
+    let sx = Math.round((TW - sw) * ax), sy = Math.round((TH - sh) * ay);
+    if (sw <= TW) sx = Math.min(Math.max(0, sx), TW - sw);
+    else sx = Math.min(Math.max(0, sx + Math.floor(sw / 2)), TW) - Math.floor(sw / 2);
+    if (sh <= TH) sy = Math.min(Math.max(0, sy), TH - sh);
+    else sy = Math.min(Math.max(0, sy + Math.floor(sh / 2)), TH) - Math.floor(sh / 2);
+    return [sx, sy, sw, sh];
+  };
+  const matchesPy = (w, p) =>
+    Math.abs(w.sx - (w.wx + p[0] * dispS)) < 2 && Math.abs(w.sy - (w.wy + p[1] * dispS)) < 2 &&
+    Math.abs(w.sw - p[2] * dispS) < 2 && Math.abs(w.sh - p[3] * dispS) < 2;
+  ed.state.reframe.scale = 1; ed.state.reframe.align_x = 0; ed.state.reframe.align_y = 1;
+  const wpy1 = ed.reframeWindow(800, 450), ppy1 = pyBox(1, 0, 1);
+  check("JS window matches the Python plate box (WYSIWYG, scale 1)", matchesPy(wpy1, ppy1),
+    "js=" + wpy1.sw.toFixed(1) + "x" + wpy1.sh.toFixed(1) + " py=" + ppy1[2] + "x" + ppy1[3]);
+  ed.state.reframe.scale = 2; ed.state.reframe.align_x = 0.5; ed.state.reframe.align_y = 0.5;
+  const wpy2 = ed.reframeWindow(800, 450), ppy2 = pyBox(2, 0.5, 0.5);
+  check("JS window matches the Python plate box at scale 2 (oversized centering)", matchesPy(wpy2, ppy2),
+    "js=" + wpy2.sw.toFixed(1) + "x" + wpy2.sh.toFixed(1) + " py=" + ppy2[2] + "x" + ppy2[3]);
+
+  /* non-center round-trip: 3/4 of the window maps to 3/4 of the source */
+  ed.state.reframe.scale = 1; ed.state.reframe.rotation = 0;
+  const wq = ed.reframeWindow(800, 450);
+  const qx = (wq.cx + wq.sw * 0.25) / 800, qy = (wq.cy - wq.sh * 0.25) / 450;
+  const q = ed.reframeCanvasToSource(qx, qy);
+  check("canvasToSource round-trips a non-center point (3/4 of the window)",
+    !!q && Math.abs(q.x - 0.75) < 0.03 && Math.abs(q.y - 0.25) < 0.03, JSON.stringify(q));
+  ed.state.reframe.align_x = 0.5; ed.state.reframe.align_y = 0.5;
+
+  /* rotate drag: grab the knob and swing it 90° clockwise (ang0 = -90°) */
+  ed.onCanvasDown({ clientX: 400, clientY: 140 });
+  ed.onCanvasMove({ clientX: 526, clientY: 225 });
+  check("rotate drag writes rotation", Math.abs(ed.state.reframe.rotation - 90) < 3, "rot=" + ed.state.reframe.rotation.toFixed(1));
+  ed.onCanvasMove({ clientX: 300, clientY: 400 });
+  check("rotate drag clamps at ±180", ed.state.reframe.rotation === 180, "rot=" + ed.state.reframe.rotation);
+  ed.onCanvasUp();
+  check("rotate commits on release", JSON.parse(ed.serialize()).reframe.rotation === 180);
+  ed.state.reframe.rotation = 0;
+
+  /* scale drag: pull the corner outward to grow, then clamp at 4× */
+  ed.onCanvasDown({ clientX: 527, clientY: 296 });
+  ed.onCanvasMove({ clientX: 700, clientY: 420 });
+  check("scale drag grows the window", ed.state.reframe.scale > 2 && ed.state.reframe.scale < 2.7, "s=" + ed.state.reframe.scale.toFixed(2));
+  ed.onCanvasMove({ clientX: 1200, clientY: 800 });
+  check("scale drag clamps at 4×", ed.state.reframe.scale === 4, "s=" + ed.state.reframe.scale);
+  ed.onCanvasUp();
+  check("scale commits on release", JSON.parse(ed.serialize()).reframe.scale === 4);
+  ed.state.reframe.scale = 1;
   ed.setRfTool("brush");
   check("back to brush tool", ed._rfTool === "brush" && ed.canvas.style.cursor === "crosshair");
 
