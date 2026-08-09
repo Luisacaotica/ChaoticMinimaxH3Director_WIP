@@ -16,6 +16,9 @@
  *                only inside [first.t, last.t]. `ease` (linear|in|out|inout|hold)
  *                shapes the outgoing motion toward the next key (hold = step).
  *                A layer without keys is static and always visible.
+ *   - speed      per-layer time-warp (0.05..4, default 1): the layer's local
+ *                clock runs at `speed` × the project timeline, so keys are
+ *                authored in LAYER time and the strip shows them at t/speed.
  *   - layers[0]  is the TOP layer (Photoshop style)
  */
 const { app } = window.comfyAPI.app;
@@ -30,7 +33,9 @@ const ASPECT_PRESETS = [
   ["9:16", 720, 1280],
   ["1:1", 1024, 1024],
 ];
-const KEYSTRIP_H = 26;
+const KEYSTRIP_RULER_H = 16;   // top ruler row (project seconds)
+const KEYSTRIP_LANE_H = 16;    // one lane per layer (top = front)
+const KEYSTRIP_GUTTER = 54;    // name column on the left of the strip
 const AUDIO_H = 84;
 
 const CSS = `
@@ -61,6 +66,8 @@ const CSS = `
 .pup-layer-thumb-canvas{flex:none}
 .pup-layer-name{flex:1;min-width:0;font-size:10.5px;color:#e8e8e8;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .pup-layer-type{font-size:9px;color:#7ea0b8;font-family:ui-monospace,Menlo,monospace;flex:none}
+.pup-drag-handle{cursor:grab;color:#555;font-size:12px;padding:0 3px;user-select:none;flex:none}
+.pup-layer-row.dragover{border-color:#4aa47f;background:rgba(74,164,127,.10)}
 .pup-keystrip-hint{font-size:10px;color:#666;padding:2px 2px}
 .pup-hint{font-size:10px;color:#8a8a8a;line-height:1.5}
 .pup-drop{border:1.5px dashed #444;border-radius:6px;padding:8px;text-align:center;color:#777;font-size:10px;cursor:pointer;transition:all .15s}
@@ -112,6 +119,8 @@ function easeF(f, mode) {
 function normalizeEase(e) { return EASE_MODES.indexOf(e) >= 0 ? e : "linear"; }
 
 function propsAt(layer, t) {
+  /* per-layer speed: evaluate in LAYER-local time (mirrors mockup.py props_at) */
+  t = t * (layer.speed || 1);
   const keys = (layer.keys || []).slice().sort((a, b) => a.t - b.t);
   if (keys.length === 0) {
     return { x: layer.x, y: layer.y, scale: layer.scale, rotation: layer.rotation, opacity: layer.opacity };
@@ -258,6 +267,7 @@ class ChaoticPuppetEditor {
       color: l.color || "#ffffff",
       font_size: Math.max(0.01, Number(l.font_size) || 0.06),
       trim_start: Math.max(0, Number(l.trim_start) || 0),
+      speed: isFinite(Number(l.speed)) ? clamp(Number(l.speed), 0.05, 4) : 1,
       keys: Array.isArray(l.keys)
         ? l.keys.map(k => ({
             t: Math.max(0, Number(k.t) || 0),
@@ -283,6 +293,7 @@ class ChaoticPuppetEditor {
         id: l.id, type: l.type, name: l.name, file: l.file, fit: l.fit,
         x: l.x, y: l.y, scale: l.scale, rotation: l.rotation, opacity: l.opacity,
         text: l.text, color: l.color, font_size: l.font_size, trim_start: l.trim_start,
+        speed: l.speed || 1,
         keys: l.keys.map(k => ({ t: k.t, ease: normalizeEase(k.ease), x: k.x, y: k.y, scale: k.scale, rotation: k.rotation, opacity: k.opacity })),
       })),
       audio: this.state.audio,
@@ -298,6 +309,23 @@ class ChaoticPuppetEditor {
   }
 
   layerById(id) { return this.state.layers.find(l => l.id === id); }
+
+  reorderLayer(fromId, toIndex) {
+    const from = this.state.layers.findIndex(l => l.id === fromId);
+    if (from < 0) return;
+    const target = Math.max(0, Math.min(this.state.layers.length - 1, toIndex));
+    if (from === target) return;
+    const [layer] = this.state.layers.splice(from, 1);
+    this.state.layers.splice(target, 0, layer);
+    this.state.layers.forEach((l, idx) => { if (l._index !== undefined) l._index = idx; });
+    this.commitChanges();
+  }
+
+  clearDragOver() {
+    if (!this.layersList) return;
+    const rows = this.layersList.querySelectorAll ? this.layersList.querySelectorAll(".pup-layer-row") : [];
+    (rows || []).forEach(r => r.classList.remove("dragover"));
+  }
 
   /* ---------------- aspect / stage size ---------------- */
   wireSizeWidgets() {
@@ -481,7 +509,7 @@ class ChaoticPuppetEditor {
     keyLegend.className = "pup-keystrip-legend";
     keyLegend.innerHTML = EASE_MODES.map(m =>
       `<span><span class="pup-ease-swatch" style="background:${EASE_COLORS[m]}"></span>${m}</span>`
-    ).join("") + `<span style="margin-left:auto">ease of each key's outgoing segment — select a key to change it</span>`;
+    ).join("") + `<span style="margin-left:auto">each row = a layer (top = front) · ease colors the outgoing motion · click a row to select it</span>`;
     this.wrapper.appendChild(keyLegend);
 
     /* layers panel */
@@ -489,7 +517,7 @@ class ChaoticPuppetEditor {
     this.layersPanel.className = "pup-panel";
     const layersTitle = document.createElement("div");
     layersTitle.className = "pup-panel-title";
-    layersTitle.innerHTML = "<span>Layers (top first)</span><span style='color:#666'>drag the stage to move the selected layer</span>";
+    layersTitle.innerHTML = "<span>Layers (top first)</span><span style='color:#666'>drag rows to reorder · drag the stage to move</span>";
     this.layersList = document.createElement("div");
     this.layersList.className = "pup-row";
     this.layersList.style.flexDirection = "column";
@@ -647,7 +675,7 @@ class ChaoticPuppetEditor {
       this.ctx.setTransform(scale, 0, 0, scale, 0, 0);
       const kw = this.keyCanvas.clientWidth || w;
       this.keyCanvas.width = Math.round(kw * scale);
-      this.keyCanvas.height = Math.round(KEYSTRIP_H * scale);
+      this.keyCanvas.height = Math.round(this.keyStripHeight() * scale);
       this.keyCtx.setTransform(scale, 0, 0, scale, 0, 0);
       const aw = this.audioWave.clientWidth || w;
       this.audioWave.width = Math.round(aw * scale);
@@ -725,7 +753,7 @@ class ChaoticPuppetEditor {
       if (v) {
         const keys = layer.keys;
         const t0 = keys.length ? keys[0].t : 0;
-        const mediaT = layer.trim_start + (this.playhead - t0);
+        const mediaT = layer.trim_start + (this.playhead * (layer.speed || 1) - t0);
         if (v.readyState >= 1 && Math.abs(v.currentTime - mediaT) > 0.08) v.currentTime = mediaT;
         ctx.drawImage(v, -tw / 2, -th / 2, tw, th);
       } else {
@@ -766,76 +794,102 @@ class ChaoticPuppetEditor {
     ctx.fillText((layer.name || layer.type).slice(0, 18), 0, 0);
   }
 
-  /* ---------------- keyframe strip ---------------- */
+  /* ---------------- keyframe strip (multi-track lanes) ---------------- */
+  keyStripHeight() {
+    return KEYSTRIP_RULER_H + Math.max(1, this.state.layers.length) * KEYSTRIP_LANE_H;
+  }
+
+  stripX(t, w) {
+    /* project-time x on the strip; a layer at speed s shows its keys at t/s. */
+    const track = Math.max(1, w - KEYSTRIP_GUTTER);
+    return KEYSTRIP_GUTTER + (clamp(t, 0, this.durationSec) / Math.max(0.001, this.durationSec)) * track;
+  }
+
   drawKeyStrip() {
     if (!this.keyCanvas || !this.keyCtx) return;
     const ctx = this.keyCtx;
     const w = this.keyCanvas.clientWidth || 800;
-    const h = KEYSTRIP_H;
+    const h = this.keyStripHeight();
+    const dur = this.durationSec;
     ctx.clearRect(0, 0, w, h);
     ctx.fillStyle = "#181818";
     ctx.fillRect(0, 0, w, h);
-    const dur = this.durationSec;
-    /* ruler ticks */
-    ctx.fillStyle = "#555";
+    const sel = this.selectedId ? this.layerById(this.selectedId) : null;
+    /* ruler row (project seconds) */
+    ctx.fillStyle = "#141414";
+    ctx.fillRect(0, 0, w, KEYSTRIP_RULER_H);
     const step = dur <= 10 ? 1 : dur <= 30 ? 5 : 10;
     for (let t = 0; t <= dur + 1e-6; t += step) {
-      const x = (t / dur) * w;
-      ctx.fillRect(x, h - 6, 1, 6);
+      const x = this.stripX(t, w);
+      ctx.fillStyle = "#555";
+      ctx.fillRect(x, KEYSTRIP_RULER_H - 5, 1, 5);
       ctx.fillStyle = "#9a9a9a";
       ctx.font = "8px ui-monospace, monospace";
-      ctx.fillText(t.toFixed(0) + "s", x + 2, h - 8);
-      ctx.fillStyle = "#555";
+      ctx.fillText(t.toFixed(0) + "s", x + 2, KEYSTRIP_RULER_H - 2);
     }
-    /* eased segment curves for the selected layer (the actual interpolation) */
-    const sel = this.selectedId ? this.layerById(this.selectedId) : null;
-    const selKeys = sel && sel.keys ? sel.keys.slice().sort((a, b) => a.t - b.t) : [];
-    if (selKeys.length > 1) {
-      ctx.lineWidth = 1;
-      for (let i = 0; i < selKeys.length - 1; i++) {
-        const a = selKeys[i], b = selKeys[i + 1];
-        const span = Math.max(1e-6, b.t - a.t);
-        ctx.strokeStyle = "rgba(155,107,255,.75)";
-        ctx.beginPath();
-        for (let s = 0; s <= 16; s++) {
-          const f = s / 16;
-          const f2 = easeF(f, normalizeEase(a.ease));
-          const x = ((a.t + f * span) / dur) * w;
-          const y = h / 2 - (f2 - 0.5) * (h - 12);
-          if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-        }
-        ctx.stroke();
-      }
-    }
-    /* key markers (fill = outgoing ease, ring = selected layer) */
-    this.state.layers.forEach(layer => {
+    ctx.strokeStyle = "#333";
+    ctx.beginPath();
+    ctx.moveTo(KEYSTRIP_GUTTER, 0);
+    ctx.lineTo(KEYSTRIP_GUTTER, h);
+    ctx.stroke();
+    /* one lane per layer, top-first (layer index 0 = front) */
+    this.state.layers.forEach((layer, i) => {
+      const laneY = KEYSTRIP_RULER_H + i * KEYSTRIP_LANE_H;
       const isSel = sel && sel.id === layer.id;
-      (layer.keys || []).forEach(k => {
-        const x = (k.t / dur) * w;
+      const speed = layer.speed && layer.speed !== 1 ? layer.speed : 1;
+      ctx.fillStyle = isSel ? "rgba(74,164,127,.13)" : (i % 2 === 0 ? "#161616" : "#181818");
+      ctx.fillRect(0, laneY, w, KEYSTRIP_LANE_H);
+      ctx.fillStyle = isSel ? "#7ee2a8" : "#777";
+      ctx.font = "8px ui-monospace, monospace";
+      ctx.textAlign = "right";
+      ctx.textBaseline = "middle";
+      const label = (layer.name || layer.type).slice(0, speed !== 1 ? 6 : 10) + (speed !== 1 ? " ×" + speed : "");
+      ctx.fillText(label, KEYSTRIP_GUTTER - 5, laneY + KEYSTRIP_LANE_H / 2 + 0.5);
+      const keys = (layer.keys || []).slice().sort((a, b) => a.t - b.t);
+      /* eased interpolation curve for THIS layer's lane */
+      if (keys.length > 1) {
+        ctx.lineWidth = 1;
+        for (let i2 = 0; i2 < keys.length - 1; i2++) {
+          const a = keys[i2], b = keys[i2 + 1];
+          const span = Math.max(1e-6, b.t - a.t);
+          ctx.strokeStyle = isSel ? "rgba(155,107,255,.95)" : "rgba(155,107,255,.32)";
+          ctx.beginPath();
+          for (let s = 0; s <= 16; s++) {
+            const f = s / 16;
+            const f2 = easeF(f, normalizeEase(a.ease));
+            const x = this.stripX((a.t + f * span) / speed, w);
+            const y = laneY + KEYSTRIP_LANE_H / 2 - (f2 - 0.5) * (KEYSTRIP_LANE_H - 7);
+            if (s === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+          }
+          ctx.stroke();
+        }
+      }
+      /* key markers (fill = outgoing ease, ring = selected layer) */
+      keys.forEach(k => {
+        const x = this.stripX(k.t / speed, w);
         ctx.fillStyle = EASE_COLORS[normalizeEase(k.ease)] || EASE_COLORS.linear;
         ctx.beginPath();
-        ctx.arc(x, h / 2, 3, 0, Math.PI * 2);
+        ctx.arc(x, laneY + KEYSTRIP_LANE_H / 2, 2.8, 0, Math.PI * 2);
         ctx.fill();
         if (isSel) {
           ctx.strokeStyle = "#4aa47f";
           ctx.beginPath();
-          ctx.arc(x, h / 2, 4.5, 0, Math.PI * 2);
+          ctx.arc(x, laneY + KEYSTRIP_LANE_H / 2, 4.2, 0, Math.PI * 2);
           ctx.stroke();
+        }
+        /* yellow ring: this layer's key is under the playhead (speed-adjusted) */
+        if (isSel && Math.abs(k.t - this.playhead * speed) < 0.02) {
+          ctx.strokeStyle = "#ffd479";
+          ctx.lineWidth = 1;
+          ctx.beginPath();
+          ctx.arc(x, laneY + KEYSTRIP_LANE_H / 2, 5.6, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.lineWidth = 1;
         }
       });
     });
-    if (sel && sel.keys && sel.keys.length) {
-      const atPlayhead = sel.keys.some(k => Math.abs(k.t - this.playhead) < 0.02);
-      if (atPlayhead) {
-        const x = (this.playhead / dur) * w;
-        ctx.fillStyle = "#ffd479";
-        ctx.beginPath();
-        ctx.arc(x, h / 2, 6, 0, Math.PI * 2);
-        ctx.stroke();
-      }
-    }
     /* playhead */
-    const x = (this.playhead / dur) * w;
+    const x = this.stripX(this.playhead, w);
     ctx.strokeStyle = "#ff5a5a";
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -843,18 +897,28 @@ class ChaoticPuppetEditor {
     ctx.lineTo(x, h);
     ctx.stroke();
     ctx.lineWidth = 1;
+    ctx.textAlign = "start";
+    ctx.textBaseline = "alphabetic";
   }
 
   onKeyStripDown(e) {
     const rect = this.keyCanvas.getBoundingClientRect();
     const w = this.keyCanvas.clientWidth || 1;
-    const t = clamp(((e.clientX - rect.left) / w) * this.durationSec, 0, this.durationSec);
+    const track = Math.max(1, w - KEYSTRIP_GUTTER);
+    const t = clamp(((e.clientX - rect.left - KEYSTRIP_GUTTER) / track) * this.durationSec, 0, this.durationSec);
+    const laneIdx = Math.floor((e.clientY - rect.top - KEYSTRIP_RULER_H) / KEYSTRIP_LANE_H);
+    if (laneIdx >= 0 && laneIdx < this.state.layers.length) {
+      this.selectedId = this.state.layers[laneIdx].id;
+      this.refreshLayerList();
+      this.buildInspector();
+    }
     this.setPlayhead(t);
     const grab = () => {
       const onMove = ev => {
         const r = this.keyCanvas.getBoundingClientRect();
         const ww = this.keyCanvas.clientWidth || 1;
-        this.setPlayhead(clamp(((ev.clientX - r.left) / ww) * this.durationSec, 0, this.durationSec));
+        const tw = Math.max(1, ww - KEYSTRIP_GUTTER);
+        this.setPlayhead(clamp(((ev.clientX - r.left - KEYSTRIP_GUTTER) / tw) * this.durationSec, 0, this.durationSec));
       };
       const onUp = () => {
         document.removeEventListener("mousemove", onMove);
@@ -907,7 +971,9 @@ class ChaoticPuppetEditor {
   /* ---------------- keyframes ---------------- */
   keyAtPlayhead(layer) {
     if (!layer) return null;
-    return (layer.keys || []).find(k => Math.abs(k.t - this.playhead) < 0.02) || null;
+    /* keys are authored in layer-local time; the playhead is project time */
+    const lt = this.playhead * (layer.speed || 1);
+    return (layer.keys || []).find(k => Math.abs(k.t - lt) < 0.02) || null;
   }
 
   ensureKeyAtPlayhead(layer) {
@@ -916,7 +982,7 @@ class ChaoticPuppetEditor {
     const existing = this.keyAtPlayhead(layer);
     if (existing) return existing;
     const cur = propsAt(layer, this.playhead) || { x: layer.x, y: layer.y, scale: layer.scale, rotation: layer.rotation, opacity: layer.opacity };
-    const key = { t: Math.round(this.playhead * 1000) / 1000, ease: "linear", x: cur.x, y: cur.y, scale: cur.scale, rotation: cur.rotation, opacity: cur.opacity };
+    const key = { t: Math.round(this.playhead * (layer.speed || 1) * 1000) / 1000, ease: "linear", x: cur.x, y: cur.y, scale: cur.scale, rotation: cur.rotation, opacity: cur.opacity };
     layer.keys.push(key);
     layer.keys.sort((a, b) => a.t - b.t);
     return key;
@@ -1244,6 +1310,25 @@ class ChaoticPuppetEditor {
     this.state.layers.forEach(layer => {
       const row = document.createElement("div");
       row.className = "pup-layer-row" + (this.selectedId === layer.id ? " sel" : "");
+      row.draggable = true;
+      row.addEventListener("dragstart", ev => {
+        this._dragLayerId = layer.id;
+        if (ev.dataTransfer) ev.dataTransfer.setData("text/pup-layer", layer.id);
+      });
+      row.addEventListener("dragover", ev => { ev.preventDefault(); row.classList.add("dragover"); });
+      row.addEventListener("dragleave", () => row.classList.remove("dragover"));
+      row.addEventListener("drop", ev => {
+        ev.preventDefault();
+        row.classList.remove("dragover");
+        const id = (ev.dataTransfer && ev.dataTransfer.getData("text/pup-layer")) || this._dragLayerId;
+        if (id && id !== layer.id) this.reorderLayer(id, this.state.layers.indexOf(layer));
+        this.clearDragOver();
+      });
+      row.addEventListener("dragend", () => this.clearDragOver());
+      const handle = document.createElement("span");
+      handle.className = "pup-drag-handle";
+      handle.textContent = "⋮⋮";
+      handle.title = "drag to reorder (top = front)";
       const thumb = document.createElement("img");
       thumb.className = "pup-layer-thumb";
       thumb.alt = "";
@@ -1267,7 +1352,8 @@ class ChaoticPuppetEditor {
       name.title = layer.file || "";
       const type = document.createElement("span");
       type.className = "pup-layer-type";
-      type.textContent = layer.type + (layer.keys && layer.keys.length ? ` · ${layer.keys.length}k` : "");
+      const speedBadge = layer.speed && layer.speed !== 1 ? ` · ×${layer.speed}` : "";
+      type.textContent = layer.type + (layer.keys && layer.keys.length ? ` · ${layer.keys.length}k` : "") + speedBadge;
       const opacity = document.createElement("input");
       opacity.className = "pup-input";
       opacity.type = "range";
@@ -1281,6 +1367,11 @@ class ChaoticPuppetEditor {
         this.setProp(layer, "opacity", Number(opacity.value));
         opacity.title = "Opacity: " + opacity.value;
       });
+      const front = document.createElement("button");
+      front.className = "pup-btn";
+      front.textContent = "⤒";
+      front.title = "Bring to front (draws on top of everything)";
+      front.addEventListener("click", ev => { ev.stopPropagation(); this.reorderLayer(layer.id, 0); });
       const up = document.createElement("button");
       up.className = "pup-btn";
       up.textContent = "▲";
@@ -1288,11 +1379,7 @@ class ChaoticPuppetEditor {
       up.addEventListener("click", ev => {
         ev.stopPropagation();
         const i = this.state.layers.indexOf(layer);
-        if (i > 0) {
-          this.state.layers.splice(i, 1);
-          this.state.layers.splice(i - 1, 0, layer);
-          this.commitChanges();
-        }
+        if (i > 0) this.reorderLayer(layer.id, i - 1);
       });
       const down = document.createElement("button");
       down.className = "pup-btn";
@@ -1301,12 +1388,13 @@ class ChaoticPuppetEditor {
       down.addEventListener("click", ev => {
         ev.stopPropagation();
         const i = this.state.layers.indexOf(layer);
-        if (i < this.state.layers.length - 1) {
-          this.state.layers.splice(i, 1);
-          this.state.layers.splice(i + 1, 0, layer);
-          this.commitChanges();
-        }
+        if (i < this.state.layers.length - 1) this.reorderLayer(layer.id, i + 1);
       });
+      const back = document.createElement("button");
+      back.className = "pup-btn";
+      back.textContent = "⤓";
+      back.title = "Send to back (draws behind everything)";
+      back.addEventListener("click", ev => { ev.stopPropagation(); this.reorderLayer(layer.id, this.state.layers.length - 1); });
       const del = document.createElement("button");
       del.className = "pup-btn danger";
       del.textContent = "✕";
@@ -1317,12 +1405,15 @@ class ChaoticPuppetEditor {
         this.commitChanges();
         this.buildInspector();
       });
+      row.appendChild(handle);
       row.appendChild(thumb);
       row.appendChild(name);
       row.appendChild(type);
       row.appendChild(opacity);
+      row.appendChild(front);
       row.appendChild(up);
       row.appendChild(down);
+      row.appendChild(back);
       row.appendChild(del);
       row.addEventListener("click", () => {
         this.selectedId = layer.id;
@@ -1432,6 +1523,35 @@ class ChaoticPuppetEditor {
       trimRow.appendChild(tin);
       ins.appendChild(trimRow);
     }
+
+    /* per-layer speed — a multi-track time-warp, not keyframed */
+    const speedRow = document.createElement("div");
+    speedRow.className = "pup-row";
+    const speedLab = document.createElement("span");
+    speedLab.className = "pup-label";
+    speedLab.style.width = "56px";
+    speedLab.textContent = "Speed ×";
+    const spIn = document.createElement("input");
+    spIn.className = "pup-input";
+    spIn.type = "number";
+    spIn.step = "0.05";
+    spIn.min = "0.05";
+    spIn.max = "4";
+    spIn.value = layer.speed || 1;
+    spIn.addEventListener("change", () => {
+      const v = Number(spIn.value);
+      layer.speed = isFinite(v) ? clamp(v, 0.05, 4) : 1;
+      this.commitChanges();
+      this.buildInspector();
+    });
+    const spHint = document.createElement("span");
+    spHint.className = "pup-label";
+    spHint.style.color = "#666";
+    spHint.textContent = "layer time-warp — 2× finishes the animation in half the project time";
+    speedRow.appendChild(speedLab);
+    speedRow.appendChild(spIn);
+    speedRow.appendChild(spHint);
+    ins.appendChild(speedRow);
 
     /* transform props — auto-keyed */
     const rows = [

@@ -247,3 +247,76 @@ def test_attach_storyboard_tags_after_real_videos_and_flows_into_prompt():
     assert "storyboard" in bundle.prompt
     assert "<Video 2>" in bundle.prompt
     assert "fully_preserved" in bundle.prompt
+
+
+def _speed_layer(speed=None):
+    layer = {
+        "id": "sp", "type": "image", "name": "", "file": "",
+        "fit": "contain", "x": 0.3, "y": 0.6, "scale": 1.0,
+        "rotation": 0, "opacity": 1.0, "text": "", "color": "#fff",
+        "font_size": 0.06, "trim_start": 0,
+        "keys": [
+            {"t": 0.0, "x": 0.3, "y": 0.6, "scale": 1.0, "rotation": 0.0, "opacity": 1.0},
+            {"t": 2.0, "x": 0.7, "y": 0.4, "scale": 1.0, "rotation": 0.0, "opacity": 1.0},
+        ],
+    }
+    if speed is not None:
+        layer["speed"] = speed
+    return layer
+
+
+def test_parse_scene_defaults_and_validates_layer_speed():
+    scene = _color_scene([_speed_layer()])
+    assert parse_scene(json.dumps(scene))["layers"][0]["speed"] == 1.0
+
+    scene = _color_scene([_speed_layer(2.5)])
+    assert parse_scene(json.dumps(scene))["layers"][0]["speed"] == 2.5
+
+    scene = _color_scene([_speed_layer(99)])
+    assert parse_scene(json.dumps(scene))["layers"][0]["speed"] == 4.0   # clamped
+
+    scene = _color_scene([_speed_layer("bogus")])
+    assert parse_scene(json.dumps(scene))["layers"][0]["speed"] == 1.0   # sanitized
+
+
+def test_props_at_speed_warps_motion():
+    # keys are authored in LAYER time: project_t = key_t / speed
+    fast = _speed_layer(2.0)
+    assert props_at(fast, 1.0)["x"] == pytest.approx(0.7)   # local t=2 -> final key
+    assert props_at(fast, 0.5)["x"] == pytest.approx(0.5)   # local t=1 -> midpoint
+    assert props_at(fast, 1.5) is None                       # local t=3 -> outside window
+
+    slow = _speed_layer(0.5)
+    assert props_at(slow, 2.0)["x"] == pytest.approx(0.5)   # local t=1 -> midpoint
+    assert props_at(slow, 4.0)["x"] == pytest.approx(0.7)   # local t=2 -> final key
+
+    # speed 1 == the classic behavior, byte for byte
+    assert props_at(_speed_layer(1.0), 1.0)["x"] == pytest.approx(0.5)
+
+
+def test_render_scene_two_layers_at_different_speeds():
+    # two solid sprites drifting right at different speeds; non-overlapping rows
+    fast = _solid_layer((200, 40, 40), size=32)   # red, y=0.25 (top)
+    fast["id"] = "fast"
+    fast["speed"] = 2.0
+    fast["keys"] = [
+        {"t": 0.0, "x": 0.25, "y": 0.25, "scale": 0.5, "rotation": 0.0, "opacity": 1.0},
+        {"t": 2.0, "x": 0.75, "y": 0.25, "scale": 0.5, "rotation": 0.0, "opacity": 1.0},
+    ]
+    slow = _solid_layer((40, 40, 200), size=32)   # blue, y=0.85 (bottom)
+    slow["id"] = "slow"
+    slow["speed"] = 0.5
+    slow["keys"] = [
+        {"t": 0.0, "x": 0.25, "y": 0.85, "scale": 0.5, "rotation": 0.0, "opacity": 1.0},
+        {"t": 2.0, "x": 0.75, "y": 0.85, "scale": 0.5, "rotation": 0.0, "opacity": 1.0},
+    ]
+    scene = _color_scene([fast, slow])
+    frames, warnings = render_scene(scene, 128, 128, fps=4, duration_sec=1.0)
+    assert frames.shape == (1, 4, 128, 128, 3)
+    assert len(warnings) == 0
+    mid = frames[0, 2]  # t=0.5, values are float 0..1
+    # fast: local t=1 -> x=0.5 -> cx=64, cy=32 (red)
+    # slow: local t=0.25 -> x=0.3125 -> cx=40, cy=109 (blue)
+    assert mid[32, 64, 0].item() > 0.6 and mid[32, 64, 2].item() < 0.4   # red sprite at cx=64
+    assert mid[109, 40, 2].item() > 0.6 and mid[109, 40, 0].item() < 0.4  # blue sprite at cx=40
+    assert mid[70, 10, 0].item() < 0.2                                     # empty corner stays bg

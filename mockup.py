@@ -117,6 +117,7 @@ def parse_scene(json_text: str) -> Dict[str, Any]:
                 "color": _as_str(entry.get("color"), "#ffffff"),
                 "font_size": max(0.01, _as_float(entry.get("font_size"), 0.06)),
                 "trim_start": max(0.0, _as_float(entry.get("trim_start"))),
+                "speed": min(4.0, max(0.05, _as_float(entry.get("speed"), 1.0))),
                 "keys": [],
             }
             raw_keys = entry.get("keys")
@@ -181,7 +182,14 @@ def props_at(layer: Dict[str, Any], t: float) -> Optional[Dict[str, float]]:
 
     A layer without keyframes is a static, always-visible sprite.  A keyframed
     layer is visible only inside [first.t, last.t].
+
+    Per-layer `speed` (0.05..4, default 1) is a time-warp: the layer's local
+    clock runs at `speed` times the project timeline, so keys are authored in
+    *layer* time and the whole animation plays in project window
+    [first.t/speed, last.t/speed] (After-Effects style stretch).  Mirrors the
+    JS `propsAt` in web/js/chaotic_puppet.js exactly.
     """
+    t = t * float(layer.get("speed", 1.0))
     keys = layer["keys"]
     if not keys:
         return {
@@ -454,7 +462,8 @@ def render_scene(
             if layer["type"] == "video":
                 keys = layer["keys"]
                 t0 = keys[0]["t"] if keys else 0.0
-                media_t = layer["trim_start"] + (t - t0)
+                # local layer time, so the clip inside also plays at `speed`
+                media_t = layer["trim_start"] + (t * float(layer.get("speed", 1.0)) - t0)
                 try:
                     sprite = cache.video_frame(layer["file"], media_t)
                 except Exception as exc:  # noqa: BLE001

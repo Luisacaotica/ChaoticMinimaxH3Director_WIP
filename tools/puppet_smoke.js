@@ -96,6 +96,8 @@ const documentMock = {
   createElement: (tag) => makeElement(tag),
   createTextNode: (text) => ({ nodeType: 3, textContent: String(text) }),
   getElementById: () => null,
+  addEventListener() {},
+  removeEventListener() {},
   head: { appendChild() {} },
   body: { appendChild() {} },
 };
@@ -313,6 +315,63 @@ function check(name, cond, extra) {
   check("REC still armed after the take", ed._recArmed === true && ed._recCapturing === false);
   ed.toggleRec();
   check("REC disarms", ed._recArmed === false);
+  ed.selectedId = null;
+
+  /* ---- multi-track: per-layer speed + z-order reordering ---- */
+  const spLayer = {
+    type: "image", name: "sp", file: "", fit: "contain",
+    x: 0.3, y: 0.6, scale: 1, rotation: 0, opacity: 1,
+    speed: 2,
+    keys: [
+      { t: 0, ease: "linear", x: 0.3, y: 0.6, scale: 1, rotation: 0, opacity: 1 },
+      { t: 2, ease: "linear", x: 0.7, y: 0.4, scale: 1, rotation: 0, opacity: 1 },
+    ],
+  };
+  check("propsAt warps by layer speed (t=0.5 -> local 1 = midpoint)",
+    Math.abs(sandbox.propsAt(spLayer, 0.5).x - 0.5) < 1e-6, "x=" + sandbox.propsAt(spLayer, 0.5).x.toFixed(3));
+  check("propsAt hides a layer outside its speed window (t=1.5 -> local 3)", sandbox.propsAt(spLayer, 1.5) === null);
+  const spSlow = Object.assign({}, spLayer, { speed: 0.5 });
+  check("propsAt slow speed: midpoint at project t=2 (local 1)",
+    Math.abs(sandbox.propsAt(spSlow, 2.0).x - 0.5) < 1e-6, "x=" + sandbox.propsAt(spSlow, 2.0).x.toFixed(3));
+
+  const heroL = ed.layerById("layer_hero");
+  check("layers default to speed 1", heroL.speed === 1, "speed=" + heroL.speed);
+  heroL.speed = 2.5;
+  ed.commitChanges();
+  check("serialize carries layer speed", JSON.parse(ed.serialize()).layers[0].speed === 2.5);
+  /* the DOM mock's innerHTML= clearing doesn't drop children, so reset the
+     list container before reading the freshest rows */
+  ed.layersList.children.length = 0;
+  ed.refreshLayerList();
+  const row0 = ed.layersList.children[0];
+  const rowTexts = row0 ? (row0.children || []).map(c => c.textContent || "").join("|") : "";
+  check("layer list row shows a speed badge", rowTexts.indexOf("×2.5") >= 0, rowTexts);
+  check("layer row has drag handle + z-order buttons",
+    rowTexts.indexOf("⋮⋮") >= 0 && rowTexts.indexOf("⤒") >= 0 && rowTexts.indexOf("⤓") >= 0, rowTexts);
+  heroL.speed = 1;
+
+  const orderBefore = ed.state.layers.map(l => l.id);
+  ed.reorderLayer("layer_title", 0);
+  const orderAfter = ed.state.layers.map(l => l.id);
+  check("reorderLayer brings a layer to the front",
+    orderAfter[0] === "layer_title" && orderBefore[0] === "layer_hero", "order=" + orderAfter.join(","));
+  ed.reorderLayer("layer_title", 1);
+  check("reorderLayer moves it back down", ed.state.layers[1].id === "layer_title");
+  check("lane strip height scales with layer count", ed.keyStripHeight() === 16 + 2 * 16, "h=" + ed.keyStripHeight());
+  let stripThrew = null;
+  try { ed.drawKeyStrip(); } catch (e) { stripThrew = e; }
+  check("multi-track lane strip draws without throwing", stripThrew === null, stripThrew ? stripThrew.message : "");
+  /* the mock's requestAnimationFrame never fires, so exercise the resize
+     path (key-strip height, DPR transforms) explicitly */
+  let crThrew = null;
+  try { ed.checkResize(); } catch (e) { crThrew = e; }
+  check("checkResize (lane strip height path) does not throw", crThrew === null, crThrew ? crThrew.message : "");
+  check("lane strip height after resize follows layer count", ed.keyStripHeight() === 16 + 2 * 16, "h=" + ed.keyStripHeight());
+  const laneClick = { clientX: 100, clientY: 40, preventDefault() {} };
+  let ksdThrew = null;
+  try { ed.onKeyStripDown(laneClick); } catch (e) { ksdThrew = e; }
+  check("clicking a lane selects that layer", ksdThrew === null && ed.selectedId === "layer_title",
+    ksdThrew ? ksdThrew.message : "sel=" + ed.selectedId);
   ed.selectedId = null;
 
   /* fresh node path */
