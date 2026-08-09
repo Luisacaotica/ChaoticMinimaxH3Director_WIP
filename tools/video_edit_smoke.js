@@ -617,6 +617,90 @@ function check(name, cond, extra) {
     unionAdded === 1 && ed.state.mask.keys.length === beforeUnion && ed.state.mask.keys[0].t === 0.5,
     "added=" + unionAdded + " keys=" + ed.state.mask.keys.length);
 
+  /* --- subject tracking (reframe.track position keyframes) --- */
+  check("track-subject buttons + static label", !!ed.trackSubjectBtn && !!ed.clearTrackBtn && ed._rfTrackLbl.textContent === "static");
+
+  /* alignAt interpolation (pure state math, no video) */
+  ed.state.reframe.track = [{ t: 0, ax: 0, ay: 0 }, { t: 1, ax: 1, ay: 1 }];
+  let al = ed.alignAt(0.5);
+  check("alignAt interpolates between keys", Math.abs(al.ax - 0.5) < 1e-9 && Math.abs(al.ay - 0.5) < 1e-9, JSON.stringify(al));
+  al = ed.alignAt(-1);
+  check("alignAt clamps before the first key", al.ax === 0 && al.ay === 0, JSON.stringify(al));
+  al = ed.alignAt(5);
+  check("alignAt clamps after the last key", al.ax === 1 && al.ay === 1, JSON.stringify(al));
+  ed.refreshReframeUI();
+  check("track label shows the keyframe count", ed._rfTrackLbl.textContent === "2 keyframes", ed._rfTrackLbl.textContent);
+
+  /* alignForSubject: window-centering math (fit smaller gives travel on both axes) */
+  ed.state.reframe.track = [];
+  ed.state.reframe.fit = "smaller";
+  ed.state.reframe.scale = 1; ed.state.reframe.rotation = 0;
+  const centered = ed.alignForSubject(0.5, 0.5);
+  check("alignForSubject centers on a centered subject", Math.abs(centered.ax - 0.5) < 0.01 && Math.abs(centered.ay - 0.5) < 0.01, JSON.stringify(centered));
+  const right = ed.alignForSubject(1, 0.5);
+  check("alignForSubject pushes the window left for a right-edge subject", right.ax === 0, JSON.stringify(right));
+  const top = ed.alignForSubject(0.5, 0);
+  check("alignForSubject moves the window down for a top-edge subject", Math.abs(top.ay - 640 / 956) < 0.01, JSON.stringify(top));
+  ed.state.reframe.rotation = 90;
+  const rotMid = ed.alignForSubject(0.5, 0.5);
+  check("alignForSubject is rotation-invariant at the center", Math.abs(rotMid.ax - 0.5) < 0.01 && Math.abs(rotMid.ay - 0.5) < 0.01, JSON.stringify(rotMid));
+  const rotRight = ed.alignForSubject(1, 0.5);
+  check("alignForSubject frames a non-centered subject at 90° (right edge -> window up)",
+    Math.abs(rotRight.ax - 0.5) < 0.01 && Math.abs(rotRight.ay - 190 / 956) < 0.01, JSON.stringify(rotRight));
+  ed.state.reframe.rotation = 0;
+
+  /* setAlignKey upsert + sort */
+  ed.setAlignKey(1.5, 1, 0);
+  ed.setAlignKey(0.25, 0, 1);
+  ed.setAlignKey(0.5, 0.5, 0.5);
+  ed.setAlignKey(1.5, 0.75, 0.25);  // replace t=1.5
+  check("setAlignKey upserts + keeps sorted",
+    JSON.stringify(ed.state.reframe.track.map(k => k.t)) === JSON.stringify([0.25, 0.5, 1.5]) &&
+    ed.state.reframe.track[2].ax === 0.75 && ed.state.reframe.track[2].ay === 0.25,
+    JSON.stringify(ed.state.reframe.track));
+
+  /* drag release writes a key at the playhead when a track is active */
+  ed.setRfTool("move");
+  ed.state.reframe.track = [{ t: 0, ax: 0, ay: 0 }, { t: 2, ax: 1, ay: 1 }];
+  ed.playhead = 1;
+  ed.onCanvasDown({ clientX: 400, clientY: 200 });
+  ed.onCanvasMove({ clientX: 400, clientY: 300 });
+  ed.onCanvasUp();
+  const dragKey = ed.state.reframe.track.find(k => Math.abs(k.t - 1) < 1e-6);
+  check("window drag writes a key at the playhead", !!dragKey && dragKey.ay > 0.5 && dragKey.ay < 1, JSON.stringify(ed.state.reframe.track));
+
+  /* clearTrack resets to static */
+  ed.clearTrack();
+  check("clearTrack empties + label resets", ed.state.reframe.track.length === 0 && ed._rfTrackLbl.textContent === "static" &&
+    (ed.statusLine.textContent || "").indexOf("static alignment") !== -1, ed._rfTrackLbl.textContent);
+
+  /* serialize carries the track */
+  ed.setAlignKey(0.5, 0.2, 0.8);
+  const trkSer = JSON.parse(ed.serialize()).reframe.track;
+  check("track serializes with the project", trkSer.length === 1 && trkSer[0].ax === 0.2 && trkSer[0].ay === 0.8, JSON.stringify(trkSer));
+
+  /* no-paint path + painted-black-mock path (mode reframe, mock frames black) */
+  ed.state.reframe.track = [];
+  ed._workMask = new Uint8ClampedArray(ed._gridW * ed._gridH);
+  await ed.trackReframeSubject();
+  check("track subject without a painted seed warns", (ed.statusLine.textContent || "").indexOf("Paint the subject") !== -1, ed.statusLine.textContent);
+  for (let i = 0; i < ed._gridH; i++) {
+    for (let j = 0; j < ed._gridW; j++) {
+      if (j >= ed._gridW * 0.3 && j <= ed._gridW * 0.5 && i >= ed._gridH * 0.3 && i <= ed._gridH * 0.5) {
+        ed._workMask[i * ed._gridW + j] = 255;
+      }
+    }
+  }
+  let trkThrew = null;
+  try { await ed.trackReframeSubject(); } catch (e) { trkThrew = e; }
+  check("track subject on a black mock does not throw (NCC floor fails cleanly)",
+    trkThrew === null && ed.state.reframe.track.length === 0,
+    trkThrew ? trkThrew.message : ed.statusLine.textContent);
+  ed.state.reframe.fit = "contain";
+  ed.state.reframe.align_x = 0.5; ed.state.reframe.align_y = 0.5;
+  ed.state.reframe.scale = 1; ed.state.reframe.rotation = 0;
+  ed.setRfTool("brush");
+
   check("fps row shows the node fps", (ed.fpsInfo.textContent || "").indexOf("fps: node 24") === 0, ed.fpsInfo.textContent);
   ed.setVideoFps(29.97);
   check("fps mismatch flagged in the row", (ed.fpsInfo.textContent || "").indexOf("mismatch") !== -1, ed.fpsInfo.textContent);
@@ -628,7 +712,8 @@ function check(name, cond, extra) {
   ed._selRect = { x0: 0.1, y0: 0.2, x1: 0.4, y1: 0.5 };
   ed.playhead = 1.25;
   await ed.copyToReference();
-  check("copyToReference adds a ref crop", ed.state.refs.length === 1 && ed.state.refs[0].src.length > 0 && ed.state.refs[0].at === 1.25, "refs=" + ed.state.refs.length);
+  check("copyToReference adds a ref crop", ed.state.refs.length === 1 && ed.state.refs[0].src.length > 0 && ed.state.refs[0].at === 1.25,
+    "refs=" + ed.state.refs.length + " | " + (ed.statusLine.textContent || ""));
   check("copyToReference uploads the crop for cross-node import", ed.state.refs[0].file === "clip.mp4" && (ed.state.refs[0].thumb || "").indexOf("view?filename=clip.mp4") !== -1, "file=" + ed.state.refs[0].file);
   check("refs row renders a thumb", ed.refsRow.style.display === "flex" && ed.refsRow.children.length === 2);
   let postedCrops = null;

@@ -469,8 +469,9 @@ class ChaoticH3VideoEdit:
             color = VOID_COLORS[edit["plate_color"]]
             # painted strokes = preserve regions (people/objects crossing the edge)
             preserve = effective_mask(build_masks(edit, fps, F, H, W), "inside")
-            plate, eff, box = reframe_plate(vid, edit["reframe"], color, preserve)
+            plate, eff, box = reframe_plate(vid, edit["reframe"], color, preserve, fps)
             preview = overlay_preview(plate, eff)
+            track = edit["reframe"].get("track") or []
             meta.update({
                 "target_w": edit["reframe"]["target_w"],
                 "target_h": edit["reframe"]["target_h"],
@@ -479,6 +480,9 @@ class ChaoticH3VideoEdit:
                 "align_y": edit["reframe"]["align_y"],
                 "scale": edit["reframe"]["scale"],
                 "rotation": edit["reframe"]["rotation"],
+                "fit": edit["reframe"].get("fit", "contain"),
+                "track_keys": len(track),
+                "track": track if track else None,
                 "source_box": list(box),
                 "note": (
                     "reframed canvas — outpaint the outside window (mask=1). "

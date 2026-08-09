@@ -298,7 +298,7 @@ class ChaoticVideoEdit {
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
       mask: { type: "rect", keys: [] },
       chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
-      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0, fit: "contain" },
+      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0, fit: "contain", track: [] },
       refs: [],
       video_fps: null,
     };
@@ -346,7 +346,7 @@ class ChaoticVideoEdit {
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
       mask: { type: "rect", keys: [] },
       chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
-      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0, fit: "contain" },
+      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0, fit: "contain", track: [] },
       refs: [],
       video_fps: null }));
   }
@@ -393,6 +393,16 @@ class ChaoticVideoEdit {
       scale: veClamp(Number(rawRf.scale) || 1, 0.1, 4),
       rotation: veClamp(Number(rawRf.rotation) || 0, -180, 180),
       fit: rawRf.fit === "smaller" ? "smaller" : "contain",
+      track: Array.isArray(rawRf.track)
+        ? rawRf.track
+            .filter(k => k && typeof k.t !== "boolean" && isFinite(Number(k.t)) && Number(k.t) >= 0)
+            .map(k => ({
+              t: Math.round(Number(k.t) * 1000) / 1000,
+              ax: k.ax == null ? 0.5 : veClamp(Number(k.ax) || 0, 0, 1),
+              ay: k.ay == null ? 0.5 : veClamp(Number(k.ay) || 0, 0, 1),
+            }))
+            .sort((a, b) => a.t - b.t)
+        : [],
     };
     this.state.refs = Array.isArray(raw.refs)
       ? raw.refs.filter(r => r && typeof r.src === "string" && r.src)
@@ -856,6 +866,26 @@ class ChaoticVideoEdit {
     this._rfRotIn = rfRotIn;
     this._rfRotLbl = rfRotLbl;
     this.reframePanel.appendChild(rotRow);
+
+    /* subject tracking: NCC-track the painted subject, keyframe the window */
+    const subjRow = document.createElement("div");
+    subjRow.className = "ve-row";
+    const btnTrackSubj = this.btn("🎯 Track subject", () => this.trackReframeSubject());
+    btnTrackSubj.title = "paint the subject with the Brush (preserve) tool, then track it across the clip — the window follows, keeping them framed (writes position keyframes; drag the window to add/override a key at the playhead)";
+    const btnClearTrk = this.btn("✕ Clear track", () => this.clearTrack());
+    btnClearTrk.title = "remove all track keyframes and snap the window back to static alignment";
+    subjRow.appendChild(btnTrackSubj);
+    subjRow.appendChild(btnClearTrk);
+    const rfTrackLbl = document.createElement("span");
+    rfTrackLbl.style.font = "10px ui-monospace, monospace";
+    rfTrackLbl.style.color = "#9fb6c9";
+    rfTrackLbl.style.marginLeft = "auto";
+    rfTrackLbl.textContent = "static";
+    subjRow.appendChild(rfTrackLbl);
+    this.trackSubjectBtn = btnTrackSubj;
+    this.clearTrackBtn = btnClear;
+    this._rfTrackLbl = rfTrackLbl;
+    this.reframePanel.appendChild(subjRow);
 
     /* auto-preserve: detect edge-crossing objects, write preserve strokes */
     const autoRow = document.createElement("div");
@@ -1335,11 +1365,18 @@ class ChaoticVideoEdit {
   }
 
   updateTrackUI(active, frac) {
+    const pct = Math.round(veClamp(frac, 0, 1) * 100);
+    const ctl = this._trackUI;
+    if (ctl) {
+      if (ctl.btn) { ctl.btn.disabled = !!active; ctl.btn.textContent = active ? ctl.label + "… " + pct + "%" : ctl.label; }
+      if (ctl.prog) ctl.prog.style.width = pct + "%";
+      return;
+    }
     if (this.trackBtn) {
       this.trackBtn.disabled = !!active;
-      this.trackBtn.textContent = active ? "Tracking… " + Math.round(veClamp(frac, 0, 1) * 100) + "%" : "Track Mask";
+      this.trackBtn.textContent = active ? "Tracking… " + pct + "%" : "Track Mask";
     }
-    if (this.trackProg) this.trackProg.style.width = Math.round(veClamp(frac, 0, 1) * 100) + "%";
+    if (this.trackProg) this.trackProg.style.width = pct + "%";
   }
 
   decodeMaskInto(target, b64, gw, gh) {
@@ -1793,8 +1830,161 @@ class ChaoticVideoEdit {
     this.commitChanges();
   }
 
+  /* --- subject tracking: keyframed window position (reframe.track) --- */
+
+  alignAt(t) {
+    /* effective align at time `t`: interpolated from the track keyframes, or
+       the static align when there is no track */
+    const rf = this.state.reframe;
+    const tr = rf.track || [];
+    if (!tr.length) return { ax: rf.align_x, ay: rf.align_y };
+    if (t <= tr[0].t) return { ax: tr[0].ax, ay: tr[0].ay };
+    const last = tr[tr.length - 1];
+    if (t >= last.t) return { ax: last.ax, ay: last.ay };
+    for (let i = 0; i < tr.length - 1; i++) {
+      const a = tr[i], b = tr[i + 1];
+      if (t >= a.t && t <= b.t) {
+        if (b.t - a.t < 1e-9) return { ax: a.ax, ay: a.ay };
+        const u = (t - a.t) / (b.t - a.t);
+        return { ax: a.ax + (b.ax - a.ax) * u, ay: a.ay + (b.ay - a.ay) * u };
+      }
+    }
+    return { ax: last.ax, ay: last.ay };
+  }
+
+  alignForSubject(scx, scy) {
+    /* (ax, ay) that centers the window on the subject at source-normalized
+       (scx, scy) — inverts the window transform (scale + rotation around the
+       window center, screen space, matching drawReframeFraming) */
+    const rf = this.state.reframe;
+    const tw = Math.max(1, rf.target_w), th = Math.max(1, rf.target_h);
+    const vw = (this.videoEl && this.videoEl.videoWidth) || tw;
+    const vh = (this.videoEl && this.videoEl.videoHeight) || th;
+    const scale = veClamp(Number(rf.scale) || 1, 0.1, 4);
+    const rot = veClamp(Number(rf.rotation) || 0, -180, 180) * Math.PI / 180;
+    const fitF = (rf.fit === "smaller") ? 0.8 : 1;
+    const k = Math.min(tw / vw, th / vh) * fitF * scale;
+    const sw = vw * k, sh = vh * k;
+    const dx = (veClamp(Number(scx), 0, 1) - 0.5) * sw;
+    const dy = (veClamp(Number(scy), 0, 1) - 0.5) * sh;
+    const ox = dx * Math.cos(rot) - dy * Math.sin(rot);
+    const oy = dx * Math.sin(rot) + dy * Math.cos(rot);
+    const cx = tw / 2 - ox, cy = th / 2 - oy;
+    const ax = sw <= tw ? veClamp((cx - sw / 2) / Math.max(1e-9, tw - sw), 0, 1) : 0.5;
+    const ay = sh <= th ? veClamp((cy - sh / 2) / Math.max(1e-9, th - sh), 0, 1) : 0.5;
+    return { ax, ay };
+  }
+
+  setAlignKey(t, ax, ay) {
+    /* upsert a track keyframe at time `t` (seconds), keeping the list sorted */
+    const rf = this.state.reframe;
+    if (!Array.isArray(rf.track)) rf.track = [];
+    const key = { t: Math.round(Number(t) * 1000) / 1000, ax: veClamp(Number(ax), 0, 1), ay: veClamp(Number(ay), 0, 1) };
+    const idx = rf.track.findIndex(k => Math.abs(k.t - key.t) < 1e-6);
+    if (idx >= 0) rf.track[idx] = key; else rf.track.push(key);
+    rf.track.sort((a, b) => a.t - b.t);
+  }
+
+  clearTrack() {
+    this.state.reframe.track = [];
+    this.refreshReframeUI();
+    this.drawPreview();
+    this.commitChanges();
+    this.updateStatus("Track cleared — the window uses static alignment again.");
+  }
+
+  async trackReframeSubject() {
+    if (this._tracking) return;
+    if (this.state.mode !== "reframe") {
+      this.updateStatus("Switch to Reframe mode first, then press Track subject.");
+      return;
+    }
+    if (!this.videoEl || !this.videoEl.src || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
+      this.updateStatus("Load a video first, then press Track subject.");
+      return;
+    }
+    this.ensureGrid();
+    const gw = this._gridW, gh = this._gridH;
+    const start = this.playhead;
+    /* seed = the painted preserve region at the playhead (source coords) */
+    const base = new Uint8ClampedArray(gw * gh);
+    const existing = this.keyAt(start);
+    if (existing) {
+      this.decodeMaskInto(base, existing.png, existing.grid_w, existing.grid_h);
+    } else {
+      let has = false;
+      for (let i = 0; i < base.length; i++) if (this._workMask[i]) { has = true; break; }
+      if (!has) {
+        this.updateStatus("Paint the subject with the Brush (preserve) tool at the playhead frame, then press Track subject — the window will follow it.");
+        return;
+      }
+      base.set(this._workMask);
+    }
+    const bbox = veMaskBBox(base, gw, gh);
+    if (!bbox) {
+      this.updateStatus("Paint the subject first (Brush preserve tool), then press Track subject.");
+      return;
+    }
+    const opts = {
+      every: Math.max(1, Math.round(this._trackOpts.every)),
+      search: veClamp(Number(this._trackOpts.search), 3, 40),
+      floor: veClamp(Number(this._trackOpts.floor), 0.3, 0.95),
+      refresh: Math.max(2, Math.round(this._trackOpts.refresh)),
+    };
+    const step = opts.every / this.fps;
+    this._tracking = true;
+    this._trackUI = { btn: this.trackSubjectBtn, prog: null, label: "Tracking" };
+    let fwd = [], bwd = [], trackErr = null;
+    try {
+      fwd = await this.trackDirection(base, start, step, opts, 1);
+      bwd = await this.trackDirection(base, start, -step, opts, -1);
+    } catch (err) {
+      trackErr = err;
+    } finally {
+      this._tracking = false;
+      this._trackUI = null;
+    }
+    if (trackErr) {
+      this.setPlayhead(start);
+      this.updateStatus("Tracking failed — " + (trackErr && trackErr.message ? trackErr.message : trackErr));
+      return;
+    }
+    if (!fwd.length && !bwd.length) {
+      this.setPlayhead(start);
+      this.updateStatus("Tracking lost immediately (score below the floor) — lower the Score threshold or increase Search, then try again.");
+      return;
+    }
+    const bcx = (bbox.x + bbox.w / 2) / gw, bcy = (bbox.y + bbox.h / 2) / gh;
+    const keys = [{ t: Math.round(start * 1000) / 1000, ...this.alignForSubject(bcx, bcy) }];
+    const addPath = (path) => {
+      for (const e of path) {
+        const scx = veClamp(bcx + e.dx / gw, 0, 1);
+        const scy = veClamp(bcy + e.dy / gh, 0, 1);
+        keys.push({ t: Math.round(e.t * 1000) / 1000, ...this.alignForSubject(scx, scy) });
+      }
+    };
+    addPath(fwd);
+    addPath(bwd);
+    const byT = new Map();
+    for (const kk of keys) byT.set(kk.t, kk);
+    this.state.reframe.track = Array.from(byT.values()).sort((a, b) => a.t - b.t);
+    this.commitChanges();
+    this.drawPreview();
+    const fwdT = fwd.length ? fwd[fwd.length - 1].t : start;
+    const bwdT = bwd.length ? bwd[bwd.length - 1].t : start;
+    this.setPlayhead(start);
+    this.updateStatus(
+      `Subject tracked → ${veFmt(fwdT)} and ← ${veFmt(bwdT)} — ${this.state.reframe.track.length} position keyframe(s). ` +
+      "Scrub to review; drag the window to add/override a key at the playhead."
+    );
+  }
+
   setReframeAlign(axis, v) {
     this.state.reframe[axis] = veClamp(Number(v), 0, 1);
+    /* with a track active, an align edit is a keyframe at the playhead */
+    if (this.state.reframe.track && this.state.reframe.track.length) {
+      this.setAlignKey(this.playhead, this.state.reframe.align_x, this.state.reframe.align_y);
+    }
     this.refreshReframeUI();
     this.drawPreview();
     this.commitChanges();
@@ -1812,6 +2002,10 @@ class ChaoticVideoEdit {
       const fit = rf.fit === "smaller" ? "smaller" : "contain";
       this.rfFitBtns.contain.classList.toggle("active", fit === "contain");
       this.rfFitBtns.smaller.classList.toggle("active", fit === "smaller");
+    }
+    if (this._rfTrackLbl) {
+      const n = (rf.track || []).length;
+      this._rfTrackLbl.textContent = n ? n + " keyframe" + (n === 1 ? "" : "s") : "static";
     }
     const scale = veClamp(Number(rf.scale) || 1, 0.1, 4);
     const rotation = veClamp(Number(rf.rotation) || 0, -180, 180);
@@ -1831,7 +2025,11 @@ class ChaoticVideoEdit {
 
   startWindowDrag(e) {
     const [W, H] = this.canvasSize();
+    /* anchor at the DISPLAYED window (interpolated track position when a track
+       is active) — flipping the drag flag first would snap the grab to the
+       static align and make the window jump on mouse-down */
     const w = this.reframeWindow(W, H);
+    this._rfDragActive = true;
     const rect = this.canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left;
     const my = e.clientY - rect.top;
@@ -1875,6 +2073,10 @@ class ChaoticVideoEdit {
   }
 
   endWindowDrag() {
+    this._rfDragActive = false;
+    /* with a track active, the drag result becomes a key at the playhead */
+    const rf = this.state.reframe;
+    if (rf.track && rf.track.length) this.setAlignKey(this.playhead, rf.align_x, rf.align_y);
     this.refreshReframeUI();
     this.commitChanges();
   }
@@ -1898,9 +2100,16 @@ class ChaoticVideoEdit {
     const k = Math.min(ww / vw, wh / vh) * fitF * scale;
     const sw = vw * k, sh = vh * k;
     /* NB: never use `|| 0.5` here — align 0 (flush left/top) is falsy and
-       would silently re-center, diverging from the Python plate geometry */
-    let sx = wx + (ww - sw) * (rf.align_x == null ? 0.5 : rf.align_x);
-    let sy = wy + (wh - sh) * (rf.align_y == null ? 0.5 : rf.align_y);
+       would silently re-center, diverging from the Python plate geometry.
+       With track keyframes the window follows the interpolated align unless
+       the user is mid-drag (then the live align wins and is committed as a
+       key on release). */
+    const tr = rf.track || [];
+    const al = (tr.length && !this._rfDragActive)
+      ? this.alignAt(this.playhead)
+      : { ax: rf.align_x == null ? 0.5 : rf.align_x, ay: rf.align_y == null ? 0.5 : rf.align_y };
+    let sx = wx + (ww - sw) * al.ax;
+    let sy = wy + (wh - sh) * al.ay;
     /* fitting window keeps its fully-inside clamp; an oversized one pins its
        center inside the target so the view stays anchored while it overflows */
     if (sw <= ww) sx = veClamp(sx, wx, wx + ww - sw);

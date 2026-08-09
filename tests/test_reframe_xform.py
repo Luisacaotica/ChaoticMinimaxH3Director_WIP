@@ -100,6 +100,81 @@ def test_parse_reframe_scale_rotation_clamps():
 def test_default_fit_is_contain():
     rf = default_edit_dict()["reframe"]
     assert rf["fit"] == "contain"
+    assert rf["track"] == []
+
+
+def _track_rf(target_w=96, target_h=54, scale=1.0, fit="smaller"):
+    rf = default_edit_dict()["reframe"]
+    rf.update({"target_w": target_w, "target_h": target_h, "feather": 0, "scale": scale, "fit": fit})
+    return rf
+
+
+def test_reframe_plate_track_keyframes_move_window():
+    # source 64x32 (landscape) -> target 96x54, fit smaller: sw=77, sh=38,
+    # x travel = 19.  Track animates align_x 0 -> 1 over the first second, so
+    # the window slides from flush-left to flush-right across the clip.
+    vid = _video(frames=25, h=32, w=64, value=0.5)
+    rf = _track_rf()
+    rf["track"] = [{"t": 0.0, "ax": 0.0, "ay": 0.5}, {"t": 1.0, "ax": 1.0, "ay": 0.5}]
+    plate, eff, box = reframe_plate(vid, rf, (0.0, 0.0, 0.0), fps=24)
+    assert box == (0, 8, 77, 38), box  # frame-0 window
+    # frame 0 (t=0): window flush left -> x=3 covered, x=90 is void
+    assert float(eff[0, 27, 3]) < 0.1, "frame 0 window covers the left"
+    assert float(eff[0, 27, 90]) > 0.9, "frame 0 right side is outpaint"
+    assert float(plate[0, 27, 3, 0]) > 0.45, "frame 0 keeps the source on the left"
+    # frame 24 (t=1): window flush right -> x=90 covered, x=3 is void
+    assert float(eff[24, 27, 90]) < 0.1, "frame 24 window covers the right"
+    assert float(eff[24, 27, 3]) > 0.9, "frame 24 left side is outpaint"
+    assert float(plate[24, 27, 90, 0]) > 0.45, "frame 24 keeps the source on the right"
+    # frame 12 (t=0.5): window centered (sx=round(19*0.5)=10) -> middle covered
+    assert float(eff[12, 27, 48]) < 0.1, "frame 12 window covers the middle"
+    assert float(eff[12, 27, 5]) > 0.9, "frame 12 x=5 is left of the window (void)"
+
+
+def test_reframe_plate_track_fps_maps_frames_to_seconds():
+    vid = _video(frames=49, h=32, w=64, value=0.5)
+    rf = _track_rf()
+    rf["track"] = [{"t": 0.0, "ax": 0.0, "ay": 0.5}, {"t": 1.0, "ax": 1.0, "ay": 0.5}]
+    # fps=48: frame 24 -> t=0.5 (window centered); fps=12: frame 6 -> t=0.5
+    _, eff48, _ = reframe_plate(vid, rf, (0.0, 0.0, 0.0), fps=48)
+    _, eff12, _ = reframe_plate(vid, rf, (0.0, 0.0, 0.0), fps=12)
+    for eff in (eff48[24], eff12[6]):
+        assert float(eff[27, 48]) < 0.1, "t=0.5 window covers the middle"
+        assert float(eff[27, 5]) > 0.9, "t=0.5 x=5 stays void"
+
+
+def test_reframe_plate_track_extrapolation_clamps():
+    # keys before/after the clip extrapolate to the nearest key, never NaN
+    vid = _video(frames=6, h=32, w=64, value=0.5)
+    rf = _track_rf()
+    rf["track"] = [{"t": 5.0, "ax": 1.0, "ay": 0.0}]  # all frames before the key
+    plate, eff, box = reframe_plate(vid, rf, (0.0, 0.0, 0.0), fps=24)
+    assert box == (19, 0, 77, 38), box  # clamped to the only key (flush right/top)
+    assert float(eff[0, 27, 90]) < 0.1, "window sits right even before the key"
+    assert float(eff[0, 27, 3]) > 0.9, "left side is void"
+    assert torch.isfinite(plate).all(), "no NaN from extrapolation"
+
+
+def test_parse_reframe_track_validation():
+    d = parse_edit_data(json.dumps({
+        "mode": "reframe",
+        "reframe": {"track": [
+            {"t": 2, "ax": 9, "ay": -1},   # clamped
+            {"t": 0.5, "ax": 0.25, "ay": 0.75},
+            {"t": 0.5, "ax": 1, "ay": 0},   # same t as previous -> deduped
+            {"ax": 0.5},                      # no t -> dropped
+            {"t": -1, "ax": 0, "ay": 0},     # negative t -> dropped
+            "junk",                           # not a dict -> dropped
+        ]},
+    }))
+    tr = d["reframe"]["track"]
+    assert [k["t"] for k in tr] == [0.5, 2.0], "sorted + deduped"
+    assert tr[0] == {"t": 0.5, "ax": 1.0, "ay": 0.0}, "last survivor at a time kept (matches the JS upsert)"
+    assert tr[1]["ax"] == 1.0 and tr[1]["ay"] == 0.0, "clamped to [0,1]"
+    d2 = parse_edit_data(json.dumps({"mode": "reframe", "reframe": {"track": "nope"}}))
+    assert d2["reframe"]["track"] == []
+    d3 = parse_edit_data(json.dumps({"mode": "reframe"}))
+    assert d3["reframe"]["track"] == []
 
 
 def test_parse_reframe_fit_validation():

@@ -78,6 +78,10 @@ def default_edit_dict() -> Dict[str, Any]:
                                  # smaller  = base fit x SMALLER_FACTOR so the
                                  # window keeps margin on BOTH axes at scale 1,
                                  # unlocking free 2D placement with the move tool
+            "track": [],         # subject-tracking position keyframes:
+                                 # [{t: seconds, ax: 0..1, ay: 0..1}] — the
+                                 # window interpolates align per frame so it
+                                 # follows a tracked subject across the clip
         },
         "refs": [],            # copy-to-reference crops: [{"src": b64png, "at": sec}]
         "video_fps": None,     # the source file's real framerate (widget estimate)
@@ -157,6 +161,32 @@ def parse_edit_data(json_text: str) -> Dict[str, Any]:
             "rotation": min(180.0, max(-180.0, _as_float(raw_rf.get("rotation"), 0.0))),
             "fit": raw_rf.get("fit") if raw_rf.get("fit") in ("contain", "smaller") else "contain",
         }
+        raw_track = raw_rf.get("track")
+        track: List[Dict[str, float]] = []
+        if isinstance(raw_track, list):
+            for k in raw_track:
+                if not isinstance(k, dict):
+                    continue
+                raw_t = k.get("t")
+                if isinstance(raw_t, bool) or not isinstance(raw_t, (int, float)):
+                    continue  # no explicit time -> drop (don't default to 0)
+                t = _as_float(raw_t)
+                if not math.isfinite(t) or t < 0:
+                    continue
+                track.append({
+                    "t": round(t, 3),
+                    "ax": min(1.0, max(0.0, _as_float(k.get("ax"), 0.5))),
+                    "ay": min(1.0, max(0.0, _as_float(k.get("ay"), 0.5))),
+                })
+            track.sort(key=lambda k: k["t"])
+            dedup: List[Dict[str, float]] = []
+            for k in track:
+                if dedup and abs(dedup[-1]["t"] - k["t"]) <= 1e-6:
+                    dedup[-1] = k  # keep the LAST at a time (matches the JS upsert)
+                else:
+                    dedup.append(k)
+            track = dedup
+        d["reframe"]["track"] = track
     raw_refs = data.get("refs")
     if isinstance(raw_refs, list):
         refs = []
@@ -355,6 +385,7 @@ def reframe_plate(
     reframe: Dict[str, Any],
     color: Tuple[float, float, float],
     preserve: Optional[torch.Tensor] = None,
+    fps: float = 24.0,
 ) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int, int, int]]:
     """Reframe canvas: place the source inside a target-aspect canvas and
     produce the outpaint mask (1 = outside the source window = to be outpainted).
@@ -363,6 +394,12 @@ def reframe_plate(
     that must NOT be outpainted even though they lie outside the window — brush
     people/objects crossing the boundary so the model keeps them instead of
     hallucinating over them.
+
+    `reframe["track"]` (optional [{t, ax, ay}], t in seconds) animates the
+    window placement: each frame's align_x/align_y are interpolated from the
+    keyframes, so the window follows a tracked subject across the clip.  With
+    no track the window is static (the historical behavior).  The returned
+    `box` is the window at frame 0.
 
     Returns (plate [F, th, tw, 3], eff [F, th, tw], box (x, y, w, h) of the
     placed source window in target coordinates).
@@ -377,6 +414,7 @@ def reframe_plate(
     scale = min(4.0, max(0.1, float(reframe.get("scale") or 1.0)))
     rot_deg = min(180.0, max(-180.0, float(reframe.get("rotation") or 0.0)))
     fit = reframe.get("fit") if reframe.get("fit") in ("contain", "smaller") else "contain"
+    track = [k for k in (reframe.get("track") or []) if isinstance(k, dict)]
 
     # window geometry: contain-fit the source, then multiply by `scale`.  A
     # window that fits keeps its old fully-inside clamp; one that outgrows the
@@ -387,16 +425,51 @@ def reframe_plate(
         s *= SMALLER_FACTOR  # keep margin on both axes at scale 1 -> free 2D placement
     k = s * scale
     sw, sh = max(1, int(round(W * k))), max(1, int(round(H * k)))
-    sx = int(round((tw - sw) * ax))
-    sy = int(round((th - sh) * ay))
-    if sw <= tw:
-        sx = min(max(0, sx), tw - sw)
+
+    def align_at(frame_idx: int) -> Tuple[float, float]:
+        """(ax, ay) for frame `frame_idx`: interpolated from the track keys
+        (t in seconds via `fps`), else the static align."""
+        if not track:
+            return ax, ay
+        t = frame_idx / max(1e-6, float(fps))
+        first, last = track[0], track[-1]
+        if t <= first["t"]:
+            return float(first.get("ax", ax)), float(first.get("ay", ay))
+        if t >= last["t"]:
+            return float(last.get("ax", ax)), float(last.get("ay", ay))
+        for i in range(len(track) - 1):
+            a, b = track[i], track[i + 1]
+            if a["t"] <= t <= b["t"]:
+                span = b["t"] - a["t"]
+                if span < 1e-9:
+                    return float(a.get("ax", ax)), float(a.get("ay", ay))
+                u = (t - a["t"]) / span
+                aax, aay = float(a.get("ax", ax)), float(a.get("ay", ay))
+                bax, bay = float(b.get("ax", ax)), float(b.get("ay", ay))
+                return aax + (bax - aax) * u, aay + (bay - aay) * u
+        return float(last.get("ax", ax)), float(last.get("ay", ay))
+
+    def window_rect(axf: float, ayf: float) -> Tuple[int, int]:
+        """(sx, sy) for a given align, with the same clamps as the static path."""
+        axc = min(1.0, max(0.0, float(axf)))
+        ayc = min(1.0, max(0.0, float(ayf)))
+        sx = int(round((tw - sw) * axc))
+        sy = int(round((th - sh) * ayc))
+        if sw <= tw:
+            sx = min(max(0, sx), tw - sw)
+        else:
+            sx = min(max(0, sx + sw // 2), tw) - sw // 2
+        if sh <= th:
+            sy = min(max(0, sy), th - sh)
+        else:
+            sy = min(max(0, sy + sh // 2), th) - sh // 2
+        return sx, sy
+
+    if track:
+        pos = [window_rect(*align_at(f)) for f in range(F)]
     else:
-        sx = min(max(0, sx + sw // 2), tw) - sw // 2
-    if sh <= th:
-        sy = min(max(0, sy), th - sh)
-    else:
-        sy = min(max(0, sy + sh // 2), th) - sh // 2
+        pos = [window_rect(ax, ay)] * F
+    sx, sy = pos[0]
     cx = sx + sw / 2.0
     cy = sy + sh / 2.0
 
@@ -408,25 +481,54 @@ def reframe_plate(
         # bounds-safe so a scaled-up window that overflows the canvas clips
         # cleanly instead of wrapping via negative indices
         src = _resize(video, sh, sw)
-        if sx < tw and sy < th and sx + sw > 0 and sy + sh > 0:
-            x0 = max(0, sx); y0 = max(0, sy)
-            x1 = min(tw, sx + sw); y1 = min(th, sy + sh)
-            plate[:, y0:y1, x0:x1, :] = src[:, y0 - sy:y1 - sy, x0 - sx:x1 - sx, :]
+        if not track:
+            # single static window (the hot path): one exact slice for all frames
+            if sx < tw and sy < th and sx + sw > 0 and sy + sh > 0:
+                x0 = max(0, sx); y0 = max(0, sy)
+                x1 = min(tw, sx + sw); y1 = min(th, sy + sh)
+                plate[:, y0:y1, x0:x1, :] = src[:, y0 - sy:y1 - sy, x0 - sx:x1 - sx, :]
+            eff = torch.ones(F, th, tw, dtype=video.dtype, device=video.device)
+            if sx < tw and sy < th and sx + sw > 0 and sy + sh > 0:
+                x0 = max(0, sx); y0 = max(0, sy)
+                eff[:, y0:min(th, sy + sh), x0:min(tw, sx + sw)] = 0.0
+            if preserve is not None:
+                p = preserve.float()[:F]  # truncate if longer; shorter stays and is skipped
+                if p.shape[0] == F:
+                    p_resized = _resize(p.unsqueeze(-1), sh, sw)[..., 0]
+                    placed = torch.zeros(F, th, tw, dtype=video.dtype, device=video.device)
+                    if sx < tw and sy < th and sx + sw > 0 and sy + sh > 0:
+                        x0 = max(0, sx); y0 = max(0, sy)
+                        placed[:, y0:min(th, sy + sh), x0:min(tw, sx + sw)] = (
+                            p_resized[:, y0 - sy:min(th, sy + sh) - sy, x0 - sx:min(tw, sx + sw) - sx]
+                        )
+                    eff = eff * (1.0 - placed.clamp(0, 1))  # painted = preserved
+            eff = _feather_mask(eff, feather)
+            return plate, eff, (sx, sy, sw, sh)
+        # tracked window: place the source per frame (the window follows the
+        # subject, so each frame may slice a different region of the target)
+        for f, (sxf, syf) in enumerate(pos):
+            if sxf < tw and syf < th and sxf + sw > 0 and syf + sh > 0:
+                x0 = max(0, sxf); y0 = max(0, syf)
+                x1 = min(tw, sxf + sw); y1 = min(th, syf + sh)
+                plate[f, y0:y1, x0:x1, :] = src[f, y0 - syf:y1 - syf, x0 - sxf:x1 - sxf, :]
         eff = torch.ones(F, th, tw, dtype=video.dtype, device=video.device)
-        if sx < tw and sy < th and sx + sw > 0 and sy + sh > 0:
-            x0 = max(0, sx); y0 = max(0, sy)
-            eff[:, y0:min(th, sy + sh), x0:min(tw, sx + sw)] = 0.0
+        for f, (sxf, syf) in enumerate(pos):
+            if sxf < tw and syf < th and sxf + sw > 0 and syf + sh > 0:
+                x0 = max(0, sxf); y0 = max(0, syf)
+                eff[f, y0:min(th, syf + sh), x0:min(tw, sxf + sw)] = 0.0
         if preserve is not None:
-            p = preserve.float()[:F]  # truncate if longer; shorter stays and is skipped
+            p = preserve.float()[:F]
             if p.shape[0] == F:
                 p_resized = _resize(p.unsqueeze(-1), sh, sw)[..., 0]
                 placed = torch.zeros(F, th, tw, dtype=video.dtype, device=video.device)
-                if sx < tw and sy < th and sx + sw > 0 and sy + sh > 0:
-                    x0 = max(0, sx); y0 = max(0, sy)
-                    placed[:, y0:min(th, sy + sh), x0:min(tw, sx + sw)] = (
-                        p_resized[:, y0 - sy:min(th, sy + sh) - sy, x0 - sx:min(tw, sx + sw) - sx]
-                    )
-                eff = eff * (1.0 - placed.clamp(0, 1))  # painted = preserved
+                for f, (sxf, syf) in enumerate(pos):
+                    if sxf < tw and syf < th and sxf + sw > 0 and syf + sh > 0:
+                        x0 = max(0, sxf); y0 = max(0, syf)
+                        placed[f, y0:min(th, syf + sh), x0:min(tw, sxf + sw)] = (
+                            p_resized[f, y0 - syf:min(th, syf + sh) - syf,
+                                      x0 - sxf:min(tw, sxf + sw) - sxf]
+                        )
+                eff = eff * (1.0 - placed.clamp(0, 1))
         eff = _feather_mask(eff, feather)
         return plate, eff, (sx, sy, sw, sh)
 
@@ -440,15 +542,35 @@ def reframe_plate(
     dev = video.device
 
     ty, tx = torch.meshgrid(torch.arange(th), torch.arange(tw), indexing="ij")
-    dx = (tx.to(dev) - cx) / k
-    dy = (ty.to(dev) - cy) / k
-    rx = dx * cos_t + dy * sin_t  # R(-theta) on the target offset
-    ry = -dx * sin_t + dy * cos_t
-    sx_ = rx + W / 2.0
-    sy_ = ry + H / 2.0
-    gx = sx_ / max(1, W - 1) * 2.0 - 1.0
-    gy = sy_ / max(1, H - 1) * 2.0 - 1.0
-    grid = torch.stack([gx, gy], dim=-1).unsqueeze(0).to(video.dtype).expand(F, -1, -1, -1)
+    if all(p == pos[0] for p in pos[1:]):
+        # static window (the common case): one grid, expanded as a view
+        cxf = pos[0][0] + sw / 2.0
+        cyf = pos[0][1] + sh / 2.0
+        dx = (tx.to(dev) - cxf) / k
+        dy = (ty.to(dev) - cyf) / k
+        rx = dx * cos_t + dy * sin_t  # R(-theta) on the target offset
+        ry = -dx * sin_t + dy * cos_t
+        sx_ = rx + W / 2.0
+        sy_ = ry + H / 2.0
+        gx = sx_ / max(1, W - 1) * 2.0 - 1.0
+        gy = sy_ / max(1, H - 1) * 2.0 - 1.0
+        grid = torch.stack([gx, gy], dim=-1).unsqueeze(0).to(video.dtype).expand(F, -1, -1, -1)
+    else:
+        # tracked window: per-frame grid (the center moves every frame)
+        grids = []
+        for (sxf, syf) in pos:
+            cxf = sxf + sw / 2.0
+            cyf = syf + sh / 2.0
+            dx = (tx.to(dev) - cxf) / k
+            dy = (ty.to(dev) - cyf) / k
+            rx = dx * cos_t + dy * sin_t
+            ry = -dx * sin_t + dy * cos_t
+            sx_ = rx + W / 2.0
+            sy_ = ry + H / 2.0
+            gx = sx_ / max(1, W - 1) * 2.0 - 1.0
+            gy = sy_ / max(1, H - 1) * 2.0 - 1.0
+            grids.append(torch.stack([gx, gy], dim=-1).unsqueeze(0))
+        grid = torch.cat(grids, dim=0).to(video.dtype)
 
     video_n = video.permute(0, 3, 1, 2)
     plate = F_nn.grid_sample(
