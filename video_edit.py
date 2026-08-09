@@ -74,6 +74,10 @@ def default_edit_dict() -> Dict[str, Any]:
             "align_y": 0.5,
             "scale": 1.0,       # source window size multiplier (0.1..4)
             "rotation": 0.0,    # source window rotation in degrees (-180..180)
+            "fit": "contain",   # contain = fill the tight axis at scale 1;
+                                 # smaller  = base fit x SMALLER_FACTOR so the
+                                 # window keeps margin on BOTH axes at scale 1,
+                                 # unlocking free 2D placement with the move tool
         },
         "refs": [],            # copy-to-reference crops: [{"src": b64png, "at": sec}]
         "video_fps": None,     # the source file's real framerate (widget estimate)
@@ -151,6 +155,7 @@ def parse_edit_data(json_text: str) -> Dict[str, Any]:
             "align_y": min(1.0, max(0.0, _as_float(raw_rf.get("align_y"), 0.5))),
             "scale": min(4.0, max(0.1, _as_float(raw_rf.get("scale"), 1.0))),
             "rotation": min(180.0, max(-180.0, _as_float(raw_rf.get("rotation"), 0.0))),
+            "fit": raw_rf.get("fit") if raw_rf.get("fit") in ("contain", "smaller") else "contain",
         }
     raw_refs = data.get("refs")
     if isinstance(raw_refs, list):
@@ -337,6 +342,14 @@ def _feather_mask(mask: torch.Tensor, px: int) -> torch.Tensor:
     return m[:, 0]
 
 
+# "fit smaller" base factor: at scale 1 the contain-fit window touches the
+# target's tight axis, leaving no travel on it.  Multiplying the base fit by
+# this factor keeps a margin on BOTH axes so the move tool can place the window
+# anywhere in 2D (picture-in-picture / free composition) instead of being
+# pinned against an edge.
+SMALLER_FACTOR = 0.8
+
+
 def reframe_plate(
     video: torch.Tensor,
     reframe: Dict[str, Any],
@@ -363,12 +376,15 @@ def reframe_plate(
     ay = min(1.0, max(0.0, float(reframe["align_y"])))
     scale = min(4.0, max(0.1, float(reframe.get("scale") or 1.0)))
     rot_deg = min(180.0, max(-180.0, float(reframe.get("rotation") or 0.0)))
+    fit = reframe.get("fit") if reframe.get("fit") in ("contain", "smaller") else "contain"
 
     # window geometry: contain-fit the source, then multiply by `scale`.  A
     # window that fits keeps its old fully-inside clamp; one that outgrows the
     # canvas (scale > 1) pins its CENTER inside instead, so the view stays
     # anchored while it overflows the edges.
     s = min(tw / W, th / H)  # contain-fit the source
+    if fit == "smaller":
+        s *= SMALLER_FACTOR  # keep margin on both axes at scale 1 -> free 2D placement
     k = s * scale
     sw, sh = max(1, int(round(W * k))), max(1, int(round(H * k)))
     sx = int(round((tw - sw) * ax))

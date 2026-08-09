@@ -95,3 +95,53 @@ def test_parse_reframe_scale_rotation_clamps():
     d3 = parse_edit_data("")
     assert d3["reframe"]["scale"] == 1.0
     assert d3["reframe"]["rotation"] == 0.0
+
+
+def test_default_fit_is_contain():
+    rf = default_edit_dict()["reframe"]
+    assert rf["fit"] == "contain"
+
+
+def test_parse_reframe_fit_validation():
+    ok = parse_edit_data(json.dumps({"mode": "reframe", "reframe": {"fit": "smaller"}}))
+    assert ok["reframe"]["fit"] == "smaller"
+    for bad in ("huge", "fill", "", 1, None):
+        d = parse_edit_data(json.dumps({"mode": "reframe", "reframe": {"fit": bad}}))
+        assert d["reframe"]["fit"] == "contain", f"fit={bad!r} must fall back to contain"
+    missing = parse_edit_data(json.dumps({"mode": "reframe"}))
+    assert missing["reframe"]["fit"] == "contain"
+
+
+def test_reframe_plate_fit_smaller_keeps_both_axis_margin():
+    # same-aspect source into the target: contain fills the tight axis with
+    # zero travel on it; smaller (x SMALLER_FACTOR) leaves room on BOTH axes
+    # at scale 1, which is what unlocks free 2D placement for the move tool.
+    vid = _video(h=32, w=64, value=0.5)  # landscape 64x32, same 16:9 as the target
+    rf = default_edit_dict()["reframe"]
+    rf.update({"target_w": 96, "target_h": 54, "feather": 0, "scale": 1.0})
+    _, _, box_fit = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
+    assert box_fit[2] == 96, "contain fills the width (tight axis)"
+    rf["fit"] = "smaller"
+    plate, eff, box_small = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
+    # s = 1.5 * 0.8 = 1.2 -> sw=round(76.8)=77, sh=round(38.4)=38
+    assert box_small == (10, 8, 77, 38), box_small
+    assert box_small[2] < 96 and box_small[3] < 54, "both axes have travel room"
+    assert float(eff[0, 0, 0]) > 0.9, "outside the smaller window is outpaint"
+    assert float(eff[0, 27, 48]) < 0.1, "window center stays covered"
+    assert float(plate[0, 27, 48, 0]) > 0.45, "covered area keeps the source"
+
+
+def test_reframe_plate_fit_smaller_free_placement_geometry():
+    # portrait source in a landscape target: with smaller, moving the window
+    # horizontally actually travels (contain would pin it flush left/right).
+    vid = _video(value=0.5)
+    rf = default_edit_dict()["reframe"]
+    rf.update({"target_w": 96, "target_h": 54, "feather": 0, "scale": 1.0, "fit": "smaller",
+               "align_x": 0.0, "align_y": 0.0})
+    _, _, box_l = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
+    rf["align_x"] = 1.0
+    _, _, box_r = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
+    assert box_l[2] == box_r[2], "same window size either placement"
+    travel = box_r[0] - box_l[0]
+    assert travel > 0, "free horizontal travel exists"
+    assert box_r[0] + box_r[2] <= 96 and box_l[0] >= 0, "both placements stay inside"

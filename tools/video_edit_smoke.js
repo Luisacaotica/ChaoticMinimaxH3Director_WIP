@@ -500,8 +500,8 @@ function check(name, cond, extra) {
      display factor (WYSIWYG proof): independent port of reframe_plate's box */
   const TW = 720, TH = 1280, VW = 1280, VH = 720;
   const dispS = Math.min(800 / TW, 450 / TH);
-  const pyBox = (scale, ax, ay) => {
-    const k = Math.min(TW / VW, TH / VH) * scale;
+  const pyBox = (scale, ax, ay, fit) => {
+    const k = Math.min(TW / VW, TH / VH) * (fit === "smaller" ? 0.8 : 1) * scale;
     const sw = Math.max(1, Math.round(VW * k)), sh = Math.max(1, Math.round(VH * k));
     let sx = Math.round((TW - sw) * ax), sy = Math.round((TH - sh) * ay);
     if (sw <= TW) sx = Math.min(Math.max(0, sx), TW - sw);
@@ -529,6 +529,44 @@ function check(name, cond, extra) {
   const q = ed.reframeCanvasToSource(qx, qy);
   check("canvasToSource round-trips a non-center point (3/4 of the window)",
     !!q && Math.abs(q.x - 0.75) < 0.03 && Math.abs(q.y - 0.25) < 0.03, JSON.stringify(q));
+  ed.state.reframe.align_x = 0.5; ed.state.reframe.align_y = 0.5;
+
+  /* fit smaller: base fit x 0.8 keeps margin on BOTH axes at scale 1, so the
+     move tool can place the window anywhere (true 2D free placement) */
+  ed.setRfFit("smaller");
+  check("Fit toggle writes smaller + serializes", ed.state.reframe.fit === "smaller" &&
+    JSON.parse(ed.serialize()).reframe.fit === "smaller" && ed.rfFitBtns.smaller.classList.contains("active"));
+  ed.state.reframe.scale = 1; ed.state.reframe.align_x = 0; ed.state.reframe.align_y = 1;
+  const wsm = ed.reframeWindow(800, 450), psm = pyBox(1, 0, 1, "smaller");
+  check("fit smaller keeps margin on both axes at scale 1",
+    wsm.sw < wsm.ww && wsm.sh < wsm.wh, "sw=" + wsm.sw.toFixed(1) + " ww=" + wsm.ww.toFixed(1));
+  check("fit smaller window matches the Python plate box (WYSIWYG)", matchesPy(wsm, psm),
+    "dx=" + Math.abs(wsm.sx - (wsm.wx + psm[0] * dispS)).toFixed(2) +
+    " dy=" + Math.abs(wsm.sy - (wsm.wy + psm[1] * dispS)).toFixed(2) +
+    " dw=" + Math.abs(wsm.sw - psm[2] * dispS).toFixed(2) +
+    " dh=" + Math.abs(wsm.sh - psm[3] * dispS).toFixed(2));
+  ed.setRfTool("move");
+  ed.onCanvasDown({ clientX: 500, clientY: 250 });
+  ed.onCanvasMove({ clientX: 620, clientY: 250 });
+  const travelX = Math.abs(ed.state.reframe.align_x - 0);
+  check("fit smaller unlocks horizontal free travel (contain pins flush)", travelX > 0.05,
+    "ax=" + ed.state.reframe.align_x.toFixed(2));
+  ed.onCanvasUp();
+  ed.setRfFit("contain");
+  check("Fit toggle round-trips back to contain", ed.state.reframe.fit === "contain" &&
+    ed.rfFitBtns.contain.classList.contains("active"));
+
+  /* flush-left placement must survive a save/load round-trip — align 0 is
+     falsy, so hydration must not re-center it (WYSIWYG parity with Python),
+     and the reframe MODE itself must survive reload too */
+  ed.setReframeAlign("align_x", 0);
+  ed.editDataWidget.value = ed.serialize();
+  ed.loadState();
+  check("flush-left placement survives save/load (align 0 not re-centered)",
+    ed.state.reframe.align_x === 0, "ax=" + ed.state.reframe.align_x);
+  check("reframe mode survives save/load", ed.state.mode === "reframe",
+    "mode=" + ed.state.mode);
+  ed.state.reframe.scale = 1; ed.state.reframe.rotation = 0;
   ed.state.reframe.align_x = 0.5; ed.state.reframe.align_y = 0.5;
 
   /* rotate drag: grab the knob and swing it 90° clockwise (ang0 = -90°) */

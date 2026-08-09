@@ -298,7 +298,7 @@ class ChaoticVideoEdit {
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
       mask: { type: "rect", keys: [] },
       chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
-      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0 },
+      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0, fit: "contain" },
       refs: [],
       video_fps: null,
     };
@@ -346,7 +346,7 @@ class ChaoticVideoEdit {
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
       mask: { type: "rect", keys: [] },
       chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
-      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0 },
+      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5, scale: 1, rotation: 0, fit: "contain" },
       refs: [],
       video_fps: null }));
   }
@@ -362,7 +362,7 @@ class ChaoticVideoEdit {
     const d = this.defaultEdit();
     this.state = {
       version: 1,
-      mode: raw.mode === "chroma" ? "chroma" : "inpaint",
+      mode: raw.mode === "chroma" || raw.mode === "reframe" ? raw.mode : "inpaint",
       edit: raw.edit === "outside" ? "outside" : "inside",
       plate_color: raw.plate_color === "green" ? "green" : "black",
       output: raw.output === "crop" ? "crop" : "full",
@@ -386,10 +386,13 @@ class ChaoticVideoEdit {
       target_w: Math.max(16, Math.min(4096, parseInt(rawRf.target_w, 10) || 1280)),
       target_h: Math.max(16, Math.min(4096, parseInt(rawRf.target_h, 10) || 720)),
       feather: Math.max(0, Math.min(64, parseInt(rawRf.feather, 10) || 8)),
-      align_x: veClamp(Number(rawRf.align_x) || 0.5, 0, 1),
-      align_y: veClamp(Number(rawRf.align_y) || 0.5, 0, 1),
+      /* NB: `Number(x) || 0.5` would map a saved 0 (flush left/top) to 0.5
+         (falsy) — use explicit null checks so flush placements survive reload */
+      align_x: rawRf.align_x == null ? 0.5 : veClamp(Number(rawRf.align_x) || 0, 0, 1),
+      align_y: rawRf.align_y == null ? 0.5 : veClamp(Number(rawRf.align_y) || 0, 0, 1),
       scale: veClamp(Number(rawRf.scale) || 1, 0.1, 4),
       rotation: veClamp(Number(rawRf.rotation) || 0, -180, 180),
+      fit: rawRf.fit === "smaller" ? "smaller" : "contain",
     };
     this.state.refs = Array.isArray(raw.refs)
       ? raw.refs.filter(r => r && typeof r.src === "string" && r.src)
@@ -748,6 +751,22 @@ class ChaoticVideoEdit {
       aspectRow.appendChild(b);
     });
     this.reframePanel.appendChild(aspectRow);
+
+    /* fit mode: contain fills the tight axis at 100% (max resolution); smaller
+       shrinks the base fit so the window has room on both axes and the move
+       tool can drag it to any position (free 2D placement) */
+    const fitRow = document.createElement("div");
+    fitRow.className = "ve-row";
+    fitRow.appendChild(this.btnL("Fit"));
+    const fitContain = this.btn("Contain", () => this.setRfFit("contain"));
+    fitContain.title = "fill the tight axis at 100% size (max resolution, window pinned to an edge at scale 1)";
+    const fitSmaller = this.btn("Smaller", () => this.setRfFit("smaller"));
+    fitSmaller.title = "fit at 80% so the window keeps margin on both axes — drag it anywhere (free 2D placement)";
+    fitContain.className = "ve-btn active";
+    this.rfFitBtns = { contain: fitContain, smaller: fitSmaller };
+    fitRow.appendChild(fitContain);
+    fitRow.appendChild(fitSmaller);
+    this.reframePanel.appendChild(fitRow);
 
     const sizeRow = document.createElement("div");
     sizeRow.className = "ve-row";
@@ -1767,6 +1786,13 @@ class ChaoticVideoEdit {
     this.commitChanges();
   }
 
+  setRfFit(mode) {
+    this.state.reframe.fit = (mode === "smaller") ? "smaller" : "contain";
+    this.refreshReframeUI();
+    this.drawPreview();
+    this.commitChanges();
+  }
+
   setReframeAlign(axis, v) {
     this.state.reframe[axis] = veClamp(Number(v), 0, 1);
     this.refreshReframeUI();
@@ -1781,6 +1807,11 @@ class ChaoticVideoEdit {
     if (this.alignBtns) {
       Object.keys(this.alignBtns.align_x).forEach(k => this.alignBtns.align_x[k].classList.toggle("active", Number(k) === rf.align_x));
       Object.keys(this.alignBtns.align_y).forEach(k => this.alignBtns.align_y[k].classList.toggle("active", Number(k) === rf.align_y));
+    }
+    if (this.rfFitBtns) {
+      const fit = rf.fit === "smaller" ? "smaller" : "contain";
+      this.rfFitBtns.contain.classList.toggle("active", fit === "contain");
+      this.rfFitBtns.smaller.classList.toggle("active", fit === "smaller");
     }
     const scale = veClamp(Number(rf.scale) || 1, 0.1, 4);
     const rotation = veClamp(Number(rf.rotation) || 0, -180, 180);
@@ -1860,10 +1891,16 @@ class ChaoticVideoEdit {
     const vh = (this.videoEl && this.videoEl.videoHeight) || H;
     const scale = veClamp(Number(rf.scale) || 1, 0.1, 4);
     const rot = veClamp(Number(rf.rotation) || 0, -180, 180) * Math.PI / 180;
-    const k = Math.min(ww / vw, wh / vh) * scale;
+    /* fit smaller (base x 0.8) keeps margin on both axes at scale 1 so the
+       move tool can place the window anywhere in 2D; must match Python's
+       SMALLER_FACTOR exactly for the WYSIWYG cross-check */
+    const fitF = (rf.fit === "smaller") ? 0.8 : 1;
+    const k = Math.min(ww / vw, wh / vh) * fitF * scale;
     const sw = vw * k, sh = vh * k;
-    let sx = wx + (ww - sw) * (rf.align_x || 0.5);
-    let sy = wy + (wh - sh) * (rf.align_y || 0.5);
+    /* NB: never use `|| 0.5` here — align 0 (flush left/top) is falsy and
+       would silently re-center, diverging from the Python plate geometry */
+    let sx = wx + (ww - sw) * (rf.align_x == null ? 0.5 : rf.align_x);
+    let sy = wy + (wh - sh) * (rf.align_y == null ? 0.5 : rf.align_y);
     /* fitting window keeps its fully-inside clamp; an oversized one pins its
        center inside the target so the view stays anchored while it overflows */
     if (sw <= ww) sx = veClamp(sx, wx, wx + ww - sw);
