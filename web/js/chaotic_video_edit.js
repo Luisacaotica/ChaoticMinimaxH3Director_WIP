@@ -155,6 +155,84 @@ function veMaskBBox(mask, gw, gh) {
   return { x: x0, y: y0, w: x1 - x0 + 1, h: y1 - y0 + 1 };
 }
 
+function veDiffMask(grayA, grayB, w, h, thr) {
+  /* Per-pixel |A-B| > thr -> 1. Returns Uint8Array (0/1). */
+  const out = new Uint8Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    if (Math.abs(grayA[i] - grayB[i]) > thr) out[i] = 1;
+  }
+  return out;
+}
+
+function veEdgeBlobs(diff, w, h, edge, marginFrac, minArea) {
+  /* Connected components of `diff` pixels that TOUCH the edge band.
+     edge: "x" -> left/right columns, "y" -> top/bottom rows (the reframe
+     letterbox axis where the void meets the source).
+     Returns [{ x0, y0, x1, y1 }] bounding boxes, area >= minArea. */
+  const mw = Math.max(1, Math.round(w * marginFrac));
+  const mh = Math.max(1, Math.round(h * marginFrac));
+  const inBand = (x, y) => (edge === "x" ? x < mw || x >= w - mw : y < mh || y >= h - mh);
+  const seen = new Uint8Array(w * h);
+  const out = [];
+  const stack = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = y * w + x;
+      if (!diff[i] || seen[i] || !inBand(x, y)) continue;
+      let x0 = x, x1 = x, y0 = y, y1 = y, count = 0;
+      stack.length = 0;
+      stack.push(i);
+      seen[i] = 1;
+      while (stack.length) {
+        const j = stack.pop();
+        const cy = (j / w) | 0, cx = j - cy * w;
+        count++;
+        if (cx < x0) x0 = cx; if (cx > x1) x1 = cx;
+        if (cy < y0) y0 = cy; if (cy > y1) y1 = cy;
+        const nb = [j - w, j + w, j - 1, j + 1];
+        for (const ni of nb) {
+          if (ni < 0 || ni >= w * h) continue;
+          if (diff[ni] && !seen[ni]) { seen[ni] = 1; stack.push(ni); }
+        }
+      }
+      if (count >= minArea) out.push({ x0, y0, x1, y1 });
+    }
+  }
+  return out;
+}
+
+function veBlobOverlap(a, b) {
+  /* Intersection / min-area overlap ratio in [0, 1]. */
+  const iw = Math.min(a.x1, b.x1) - Math.max(a.x0, b.x0);
+  const ih = Math.min(a.y1, b.y1) - Math.max(a.y0, b.y0);
+  if (iw <= 0 || ih <= 0) return 0;
+  const inter = iw * ih;
+  return inter / Math.min((a.x1 - a.x0 + 1) * (a.y1 - a.y0 + 1), (b.x1 - b.x0 + 1) * (b.y1 - b.y0 + 1));
+}
+
+function veClusterCandidates(samples, maxObjects) {
+  /* Chain edge-crossing samples into objects (consecutive blobs that overlap),
+     return the strongest occurrence of each, biggest-first, capped.
+     samples: [{ t, blob }] sorted by t. */
+  const objs = [];
+  let cur = null;
+  for (const s of samples) {
+    const b = s.blob;
+    const area = (b.x1 - b.x0 + 1) * (b.y1 - b.y0 + 1);
+    if (cur && s.t - cur.lastT <= 1.0 && veBlobOverlap(cur.lastBlob, b) > 0.1) {
+      cur.samples.push(s);
+      cur.lastT = s.t;
+      cur.lastBlob = b;
+      if (area > cur.best.area) cur.best = { t: s.t, blob: b, area };
+    } else {
+      cur = { samples: [s], lastT: s.t, lastBlob: b, best: { t: s.t, blob: b, area } };
+      objs.push(cur);
+    }
+  }
+  objs.sort((a, b) => b.best.area - a.best.area);
+  return objs.slice(0, Math.max(1, maxObjects)).map(o => o.best);
+}
+
 function veTranslateMask(mask, gw, gh, gdx, gdy) {
   /* Shift the painted mask by (gdx, gdy) grid cells; out-of-frame -> 0. */
   const out = new Uint8ClampedArray(gw * gh);
@@ -231,6 +309,8 @@ class ChaoticVideoEdit {
     this._rectAnchor = null;
     this._rfTool = "brush";   // reframe tool: brush (preserve) | move (window)
     this._dragWin = null;     // active window drag state
+    this._autoPreserving = false;
+    this._autoOpts = { stride: 0.5, margin: 0.15, minArea: 12, maxObjects: 3, floor: 0.55 };
     this._workMask = null;        // Uint8ClampedArray grid, 255 = masked
     this._gridW = 0; this._gridH = 0;
     this._lastWidth = 0; this._lastScale = 0;
@@ -710,6 +790,39 @@ class ChaoticVideoEdit {
       alignRow.appendChild(b);
     });
     this.reframePanel.appendChild(alignRow);
+
+    /* auto-preserve: detect edge-crossing objects, write preserve strokes */
+    const autoRow = document.createElement("div");
+    autoRow.className = "ve-row";
+    const btnAuto = this.btn("🛡 Auto preserve", () => this.autoPreserve());
+    btnAuto.title = "detect objects crossing the reframe edge and write preserve strokes that follow them (NCC tracker)";
+    this.autoBtn = btnAuto;
+    autoRow.appendChild(btnAuto);
+    autoRow.appendChild(this.btnL("Every"));
+    const strideSel = document.createElement("select");
+    strideSel.className = "ve-input";
+    [[0.25, "0.25s"], [0.5, "0.5s"], [1, "1s"], [2, "2s"]].forEach(([v, l]) => {
+      const o = document.createElement("option");
+      o.value = String(v);
+      o.textContent = l;
+      strideSel.appendChild(o);
+    });
+    strideSel.value = String(this._autoOpts.stride);
+    strideSel.addEventListener("change", () => { this._autoOpts.stride = Number(strideSel.value); });
+    autoRow.appendChild(strideSel);
+    autoRow.appendChild(this.btnL("Max"));
+    const maxSel = document.createElement("select");
+    maxSel.className = "ve-input";
+    [1, 2, 3, 4, 5, 6].forEach(v => {
+      const o = document.createElement("option");
+      o.value = String(v);
+      o.textContent = String(v);
+      maxSel.appendChild(o);
+    });
+    maxSel.value = String(this._autoOpts.maxObjects);
+    maxSel.addEventListener("change", () => { this._autoOpts.maxObjects = Number(maxSel.value); });
+    autoRow.appendChild(maxSel);
+    this.reframePanel.appendChild(autoRow);
 
     const rfHint = document.createElement("div");
     rfHint.className = "ve-hint";
@@ -1832,6 +1945,187 @@ class ChaoticVideoEdit {
       cell.appendChild(del);
       this.refsRow.appendChild(cell);
     });
+  }
+
+  /* Auto-preserve: detect objects crossing the reframe edge (motion in the
+     letterbox band) and write preserve strokes that follow them via the same
+     NCC tracker the mask tracking uses. */
+  async autoPreserve() {
+    if (this._autoPreserving) return;
+    if (this.state.mode !== "reframe") {
+      this.updateStatus("Switch to Reframe mode first, then press Auto preserve.");
+      return;
+    }
+    if (!this.videoEl || !this.videoEl.src || !isFinite(this.videoEl.duration) || this.videoEl.duration <= 0) {
+      this.updateStatus("Load a video first, then press Auto preserve.");
+      return;
+    }
+    const rf = this.state.reframe;
+    const vw = this.videoEl.videoWidth || 1280, vh = this.videoEl.videoHeight || 720;
+    const s = Math.min(rf.target_w / vw, rf.target_h / vh);
+    const spareX = rf.target_w - vw * s, spareY = rf.target_h - vh * s;
+    if (spareX < 1 && spareY < 1) {
+      this.updateStatus("Target aspect matches the source — there is no outside to outpaint.");
+      return;
+    }
+    this.ensureGrid();
+    const opts = {
+      stride: Math.max(0.2, Number(this._autoOpts.stride) || 0.5),
+      margin: veClamp(Number(this._autoOpts.margin) || 0.15, 0.05, 0.4),
+      minArea: Math.max(4, Math.round(Number(this._autoOpts.minArea) || 12)),
+      maxObjects: Math.max(1, Math.min(6, Math.round(Number(this._autoOpts.maxObjects) || 3))),
+      floor: veClamp(Number(this._autoOpts.floor) || 0.55, 0.3, 0.9),
+      diffThr: 0.08,
+    };
+    const edge = spareX >= spareY ? "x" : "y";
+    const dur = this.durationSec;
+    const trackW = 160, trackH = Math.max(8, Math.round(trackW * vh / vw));
+    const off = document.createElement("canvas");
+    off.width = trackW; off.height = trackH;
+    const octx = off.getContext("2d", { willReadFrequently: true });
+    const frameGray = () => {
+      octx.drawImage(this.videoEl, 0, 0, trackW, trackH);
+      try {
+        return veGray(octx.getImageData(0, 0, trackW, trackH));
+      } catch (e) {
+        throw new Error("cannot read video pixels (canvas tainted?) — " + (e && e.message ? e.message : e));
+      }
+    };
+    this._autoPreserving = true;
+    try {
+      const times = [];
+      for (let t = 0; t <= dur - 1e-6; t += opts.stride) times.push(t);
+      if (times.length < 2) {
+        this.updateStatus("Clip too short for Auto preserve.");
+        return;
+      }
+      /* pass 1: motion scan -> edge-crossing candidates */
+      const samples = [];
+      let prev = null;
+      for (let i = 0; i < times.length; i++) {
+        this.updateStatus("Auto preserve: scanning " + Math.round((i / times.length) * 100) + "%");
+        await this.seekVideo(times[i]);
+        const g = frameGray();
+        if (prev) {
+          const diff = veDiffMask(prev, g, trackW, trackH, opts.diffThr);
+          for (const blob of veEdgeBlobs(diff, trackW, trackH, edge, opts.margin, opts.minArea)) {
+            samples.push({ t: times[i], blob });
+          }
+        }
+        prev = g;
+      }
+      if (!samples.length) {
+        this.updateStatus("Auto preserve: no objects crossing the edge found (try a larger Margin or smaller Min area).");
+        return;
+      }
+      /* pass 2: lock a template onto each object and NCC-track it both ways */
+      const objects = veClusterCandidates(samples, opts.maxObjects);
+      const tracked = [];
+      for (let k = 0; k < objects.length; k++) {
+        const obj = objects[k];
+        const cx = (obj.blob.x0 + obj.blob.x1) / 2;
+        const cy = (obj.blob.y0 + obj.blob.y1) / 2;
+        const bw = Math.max(6, obj.blob.x1 - obj.blob.x0 + 1);
+        const bh = Math.max(6, obj.blob.y1 - obj.blob.y0 + 1);
+        const pw = veClamp(Math.round(bw * 1.4), 8, 48);
+        const ph = veClamp(Math.round(bh * 1.4), 8, 48);
+        await this.seekVideo(obj.t);
+        const tpl = vePatch(frameGray(), trackW, trackH, cx, cy, pw, ph);
+        const radius = Math.max(6, Math.round(0.25 * trackW));
+        const pts = [{ t: obj.t, cx, cy, score: 1 }];
+        for (const dir of [1, -1]) {
+          let px = cx, py = cy, sinceRefresh = 0;
+          for (let t = obj.t + dir * opts.stride; dir > 0 ? t <= dur + 1e-6 : t >= -1e-6; t += dir * opts.stride) {
+            const tt = veClamp(t, 0, dur);
+            this.updateStatus("Auto preserve: tracking object " + (k + 1) + "/" + objects.length);
+            await this.seekVideo(tt);
+            const g = frameGray();
+            const hit = veSearch(g, trackW, trackH, tpl, px, py, radius, 2);
+            if (hit.score < opts.floor) break;
+            px += hit.dx;
+            py += hit.dy;
+            /* periodic template refresh fights drift (mirrors Track Mask) */
+            sinceRefresh++;
+            if (sinceRefresh >= 8) {
+              tpl = vePatch(g, trackW, trackH, px, py, tpl.w, tpl.h);
+              sinceRefresh = 0;
+            }
+            pts.push({ t: tt, cx: px, cy: py, score: hit.score });
+          }
+        }
+        tracked.push({ pts, rw: bw, rh: bh });
+      }
+      const added = this.writeAutoPreserveKeys(tracked, trackW, trackH);
+      if (added === 0) {
+        this.updateStatus("Auto preserve: nothing tracked well enough to write (raise/lower the score floor?).");
+        return;
+      }
+      this.updateStatus("Auto preserve: " + added + " preserve keyframe(s) added for " + tracked.length + " edge-crossing object(s) — refine with the brush if needed.");
+      this.setPlayhead(this.playhead);
+    } finally {
+      this._autoPreserving = false;
+    }
+  }
+
+  writeAutoPreserveKeys(tracked, trackW, trackH) {
+    const gw = this._gridW, gh = this._gridH;
+    if (!gw || !gh || !tracked.length) return 0;
+    const byTime = new Map();
+    for (const obj of tracked) {
+      for (const p of obj.pts) {
+        const t = Math.round(p.t * 100) / 100;
+        if (!byTime.has(t)) byTime.set(t, new Uint8ClampedArray(gw * gh));
+        const grid = byTime.get(t);
+        const cx = p.cx * (gw / trackW), cy = p.cy * (gh / trackH);
+        const rw = Math.max(2, Math.round(obj.rw * 0.6 * (gw / trackW)));
+        const rh = Math.max(2, Math.round(obj.rh * 0.6 * (gh / trackH)));
+        const cxi = Math.round(cx), cyi = Math.round(cy);
+        for (let y = Math.max(0, cyi - rh); y <= Math.min(gh - 1, cyi + rh); y++) {
+          for (let x = Math.max(0, cxi - rw); x <= Math.min(gw - 1, cxi + rw); x++) {
+            const d = Math.hypot((x - cx) / rw, (y - cy) / rh);
+            if (d <= 1) {
+              const v = Math.round(255 * (1 - Math.max(0, d - 0.7) / 0.3));
+              grid[y * gw + x] = Math.max(grid[y * gw + x], v);
+            }
+          }
+        }
+      }
+    }
+    let ts = Array.from(byTime.keys()).sort((a, b) => a - b);
+    /* decimate so dense tracks don't bloat the workflow JSON, but always keep
+       the last sample so the stroke reaches the exact crossing moment */
+    const maxKeys = 24;
+    const step = Math.max(1, Math.ceil(ts.length / maxKeys));
+    ts = ts.filter((_, i) => i % step === 0);
+    const realLast = Array.from(byTime.keys()).reduce((m, t) => Math.max(m, t), -1);
+    if (ts.length && Math.abs(ts[ts.length - 1] - realLast) > 1e-6) ts.push(realLast);
+    if (!ts.length) return 0;
+    /* union with existing keys at colliding times — auto strokes ADD to the
+       user's brush work instead of replacing it */
+    const collision = new Set();
+    const keys = [];
+    for (const k of this.state.mask.keys) {
+      const hit = ts.find(t => Math.abs(t - k.t) < 1e-6);
+      if (hit == null) {
+        keys.push(k);
+      } else {
+        collision.add(hit);
+        const grid = new Uint8ClampedArray(gw * gh);
+        this.decodeMaskInto(grid, k.png, gw, gh);
+        const autoGrid = byTime.get(hit);
+        for (let i = 0; i < grid.length; i++) grid[i] = Math.max(grid[i], autoGrid[i]);
+        keys.push({ t: hit, grid_w: gw, grid_h: gh, png: this.maskToPng(grid, gw, gh) });
+      }
+    }
+    for (const t of ts) {
+      if (collision.has(t)) continue;
+      keys.push({ t, grid_w: gw, grid_h: gh, png: this.maskToPng(byTime.get(t), gw, gh) });
+    }
+    keys.sort((a, b) => a.t - b.t);
+    this.state.mask.keys = keys;
+    this.state.mask.type = "brush";
+    this.commitChanges();
+    return ts.length;
   }
   setPlate(c) { this.state.plate_color = c; this.refreshToggleStates(); this.commitChanges(); }
   setOutput(o) { this.state.output = o; this.refreshToggleStates(); this.commitChanges(); }

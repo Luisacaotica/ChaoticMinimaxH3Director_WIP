@@ -380,6 +380,42 @@ function check(name, cond, extra) {
   const green = sandbox.veDetectKeyColor({ width: 20, height: 20, data: solid });
   check("veDetectKeyColor green screen full coverage", green.color[1] > 0.9 && green.frac === 1, "g=" + green.color[1].toFixed(2));
 
+  /* auto-preserve pure helpers */
+  const makeGray = (w, h, fill, rect) => {
+    const g = new Float32Array(w * h);
+    if (fill) g.fill(fill);
+    if (rect) for (let y = rect.y0; y <= rect.y1; y++) for (let x = rect.x0; x <= rect.x1; x++) g[y * w + x] = 1;
+    return g;
+  };
+  const ga = makeGray(40, 24, 0.1, { x0: 0, y0: 2, x1: 6, y1: 8 });
+  const gb = makeGray(40, 24, 0.1, { x0: 0, y0: 3, x1: 6, y1: 9 });
+  const diff = sandbox.veDiffMask(ga, gb, 40, 24, 0.05);
+  let diffCount = 0;
+  for (let i = 0; i < diff.length; i++) diffCount += diff[i];
+  check("veDiffMask flags only moved pixels", diffCount > 0 && diffCount < 40 * 24, "n=" + diffCount);
+  const edgeBlobs = sandbox.veEdgeBlobs(diff, 40, 24, "x", 0.1, 4);
+  check("veEdgeBlobs finds the edge-touching mover", edgeBlobs.length >= 1 && edgeBlobs[0].x0 === 0, JSON.stringify(edgeBlobs));
+  const centerDiff = new Uint8Array(40 * 24);
+  for (let y = 10; y <= 15; y++) for (let x = 10; x <= 15; x++) centerDiff[y * 40 + x] = 1;
+  check("veEdgeBlobs ignores center motion", sandbox.veEdgeBlobs(centerDiff, 40, 24, "x", 0.1, 4).length === 0);
+  const topDiff = new Uint8Array(40 * 24);
+  for (let y = 0; y <= 3; y++) for (let x = 10; x <= 14; x++) topDiff[y * 40 + x] = 1;
+  check("veEdgeBlobs finds top-edge motion on the y axis", sandbox.veEdgeBlobs(topDiff, 40, 24, "y", 0.1, 4).length >= 1);
+  const sideDiff = new Uint8Array(40 * 24);
+  for (let y = 5; y <= 10; y++) for (let x = 37; x <= 39; x++) sideDiff[y * 40 + x] = 1;
+  check("veEdgeBlobs ignores side motion on the y axis", sandbox.veEdgeBlobs(sideDiff, 40, 24, "y", 0.1, 4).length === 0);
+  const clustered = sandbox.veClusterCandidates([
+    { t: 0.5, blob: { x0: 0, y0: 0, x1: 5, y1: 5 } },
+    { t: 1.0, blob: { x0: 1, y0: 0, x1: 6, y1: 5 } },
+    { t: 2.0, blob: { x0: 30, y0: 0, x1: 35, y1: 5 } },
+  ], 3);
+  check("veClusterCandidates chains + sorts objects", clustered.length === 2 && clustered[0].t === 0.5, JSON.stringify(clustered));
+  const capped = sandbox.veClusterCandidates([
+    { t: 0.5, blob: { x0: 0, y0: 0, x1: 5, y1: 5 } },
+    { t: 1.0, blob: { x0: 1, y0: 0, x1: 6, y1: 5 } },
+  ], 1);
+  check("veClusterCandidates caps max objects", capped.length === 1, JSON.stringify(capped));
+
   ed.setChromaPreset([0, 0, 1]);
   check("setChromaPreset sets blue + auto off",
     ed.state.chroma.color[2] > 0.9 && ed.state.chroma.auto === false && ed.autoBtn.classList.contains("active") === false);
@@ -433,6 +469,32 @@ function check(name, cond, extra) {
   check("window drag commits on release", JSON.parse(ed.serialize()).reframe.align_y === 1);
   ed.setRfTool("brush");
   check("back to brush tool", ed._rfTool === "brush" && ed.canvas.style.cursor === "crosshair");
+
+  /* auto-preserve widget paths (mode is still reframe; mock video frames are black) */
+  const autoKeysBefore = ed.state.mask.keys.length;
+  let apThrew = null;
+  try { await ed.autoPreserve(); } catch (e) { apThrew = e; }
+  check("autoPreserve on a black mock adds nothing and does not throw",
+    apThrew === null && ed.state.mask.keys.length === autoKeysBefore && (ed.statusLine.textContent || "").indexOf("no objects") !== -1,
+    apThrew ? apThrew.message : ed.statusLine.textContent);
+  const addedKeys = ed.writeAutoPreserveKeys(
+    [{ pts: [{ t: 0.5, cx: 20, cy: 18 }, { t: 1.0, cx: 24, cy: 18 }], rw: 6, rh: 6 }],
+    160, 90);
+  check("writeAutoPreserveKeys writes sorted brush keys",
+    addedKeys === 2 && ed.state.mask.type === "brush" &&
+    ed.state.mask.keys.length === autoKeysBefore + 2 &&
+    ed.state.mask.keys.every((k, i, a) => i === 0 || a[i - 1].t <= k.t) &&
+    ed.state.mask.keys.every(k => (k.png || "").length > 0),
+    "added=" + addedKeys + " keys=" + ed.state.mask.keys.length);
+  /* union: auto keys must ADD to a manual key at the same time, not replace it */
+  ed.state.mask.keys = [{ t: 0.5, grid_w: 320, grid_h: 180, png: "QUJDRA==" }];
+  const beforeUnion = ed.state.mask.keys.length;
+  const unionAdded = ed.writeAutoPreserveKeys(
+    [{ pts: [{ t: 0.5, cx: 20, cy: 18 }], rw: 6, rh: 6 }],
+    160, 90);
+  check("writeAutoPreserveKeys unions with a manual key at the same time",
+    unionAdded === 1 && ed.state.mask.keys.length === beforeUnion && ed.state.mask.keys[0].t === 0.5,
+    "added=" + unionAdded + " keys=" + ed.state.mask.keys.length);
 
   check("fps row shows the node fps", (ed.fpsInfo.textContent || "").indexOf("fps: node 24") === 0, ed.fpsInfo.textContent);
   ed.setVideoFps(29.97);
