@@ -417,6 +417,8 @@ class ChaoticDirectorEditor {
     const btnImportImg = this.btn("⬆ Picture", () => this.pickFiles("picture"));
     const btnImportVid = this.btn("⬆ Video", () => this.pickFiles("video"));
     const btnImportAud = this.btn("⬆ Audio", () => this.pickFiles("audio"));
+    const btnImportCrops = this.btn("📥 Crops", () => this.importCrops());
+    btnImportCrops.title = "import the crops exported from Chaotic H3 Video Edit (⤴ Export crops) — each becomes a <Picture N> library card you can drag into any prompt or onto the timeline.";
     const btnProject = this.btn("Project", () => this.toggleProjectPanel());
     const btnLibrary = this.btn("Library", () => this.toggleLibraryPanel());
     const btnIn = this.btn("⏮ IN", () => this.setRenderIn());
@@ -2030,6 +2032,61 @@ class ChaoticDirectorEditor {
         this.updateStatus("Copy to ref failed: " + (err && err.message ? err.message : err));
       }
     })();
+  }
+
+  async importCrops() {
+    try {
+      const resp = await api.fetchApi("/chaotic_h3/crops");
+      if (resp.status !== 200) {
+        this.updateStatus("Could not load exported crops (" + resp.status + ").");
+        return;
+      }
+      const data = await resp.json();
+      const crops = (data && data.crops) || [];
+      if (!crops.length) {
+        this.updateStatus("No exported crops found — copy crops in Chaotic H3 Video Edit, then press ⤴ Export crops there.");
+        return;
+      }
+      let added = 0;
+      let skipped = 0;
+      for (const c of crops) {
+        if (!c || !c.file) continue;
+        if (this.state.refs.some(r => r.kind === "picture" && r.file === c.file)) {
+          skipped++; // already in the library — never duplicate a card
+          continue;
+        }
+        const seg = String(c.file).split("/");
+        const name = seg.pop();
+        const sub = seg.join("/");
+        const url = api.apiURL(`/view?filename=${encodeURIComponent(name)}&type=input&subfolder=${encodeURIComponent(sub)}`);
+        const at = c.at != null ? c.at : 0;
+        const ref = this.normalizeRef({
+          id: uid("ref"),
+          kind: "picture",
+          file: c.file,
+          name: c.note ? c.note : "crop @" + at + "s",
+          start: 0,
+          duration: 3,
+          tag_type: "picture",
+          role: "reference",
+          strength: 0.9,
+          timed: false,
+          thumb: url,
+        }, this.state.refs.length);
+        this.state.refs.push(ref);
+        added++;
+      }
+      if (added) {
+        this.commitChanges();
+        this.renderTimeline();
+      }
+      const msg = skipped > 0
+        ? "Imported " + added + " crop(s) — " + skipped + " already in the library, skipped."
+        : "Imported " + added + " crop(s) into the reference library — each <Picture N> card can be dragged into any prompt or onto the timeline.";
+      this.updateStatus(msg);
+    } catch (e) {
+      this.updateStatus("Import crops failed: " + (e && e.message ? e.message : e));
+    }
   }
 
   previewRefForPlayhead(sec) {

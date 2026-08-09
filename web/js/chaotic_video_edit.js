@@ -1912,10 +1912,28 @@ class ChaoticVideoEdit {
       ctx.drawImage(this.videoEl, x0, y0, c.width, c.height, 0, 0, c.width, c.height);
       const b64 = c.toDataURL("image/png").split(",")[1] || "";
       if (!b64) { this.updateStatus("Could not capture the frame (canvas tainted?)."); return; }
-      this.state.refs.push({ src: b64, at: Math.round(this.playhead * 100) / 100, note: "" });
+      /* persist the crop as a real file in ComfyUI's input folder so the other
+         editors can import it (Director library card / Mockup layer) via the
+         crops bundle — non-fatal, the b64 still feeds `ref_images`. */
+      let file = "", thumb = "";
+      try {
+        if (typeof fetch === "function") {
+          const blob = await (await fetch("data:image/png;base64," + b64)).blob();
+          const body = new FormData();
+          body.append("image", blob, "ve_crop_" + Date.now() + ".png");
+          const up = await api.fetchApi("/upload/image", { method: "POST", body });
+          if (up.status === 200) {
+            const data = await up.json();
+            const sub = data.subfolder || "";
+            file = sub ? sub + "/" + data.name : data.name;
+            thumb = api.apiURL(`/view?filename=${encodeURIComponent(data.name)}&type=input&subfolder=${encodeURIComponent(sub)}`);
+          }
+        }
+      } catch (err) { /* non-fatal: the crop still works for ref_images */ }
+      this.state.refs.push({ src: b64, file, thumb, at: Math.round(this.playhead * 100) / 100, note: "" });
       this.renderRefsRow();
       this.commitChanges();
-      this.updateStatus("Reference crop added (" + c.width + "×" + c.height + " @ " + this.playhead.toFixed(2) + "s) — wire `ref_images` into your H3 reference input.");
+      this.updateStatus("Reference crop added (" + c.width + "×" + c.height + " @ " + this.playhead.toFixed(2) + "s) — wire `ref_images` into your H3 reference input, or ⤴ Export crops to send it to the Director library / Mockup stage.");
     } catch (e) {
       this.updateStatus("Copy to ref failed — " + (e && e.message ? e.message : e));
     }
@@ -1945,6 +1963,38 @@ class ChaoticVideoEdit {
       cell.appendChild(del);
       this.refsRow.appendChild(cell);
     });
+    const exp = this.btn("⤴ Export crops", () => this.exportCrops());
+    exp.className = "ve-btn";
+    exp.title = "Export these crops to input/chaotic_h3_crops.json so Chaotic H3 Director (Library → 📥 Crops) and the Mockup Editor (📥 Crops) can import them.";
+    this.refsRow.appendChild(exp);
+  }
+
+  async exportCrops() {
+    const withFiles = this.state.refs.filter(r => r && r.file);
+    if (!withFiles.length) {
+      this.updateStatus("Nothing to export — crops copied before the upload change have no file; re-copy a crop now so it can be shared.");
+      return;
+    }
+    const skipped = this.state.refs.length - withFiles.length;
+    try {
+      const resp = await api.fetchApi("/chaotic_h3/crops", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          crops: withFiles.map(r => ({ file: r.file, at: r.at, note: r.note || "" })),
+        }),
+      });
+      if (resp.status === 200) {
+        const msg = skipped > 0
+          ? "Exported " + withFiles.length + " of " + this.state.refs.length + " crop(s) — " + skipped + " have no uploaded file; re-copy them so they can be shared."
+          : "Exported " + withFiles.length + " crop(s) to input/chaotic_h3_crops.json — import them in the Director (Library → 📥 Crops) or the Mockup Editor (📥 Crops).";
+        this.updateStatus(msg);
+      } else {
+        this.updateStatus("Export failed (" + resp.status + ").");
+      }
+    } catch (e) {
+      this.updateStatus("Export failed — " + (e && e.message ? e.message : e));
+    }
   }
 
   /* Auto-preserve: detect objects crossing the reframe edge (motion in the

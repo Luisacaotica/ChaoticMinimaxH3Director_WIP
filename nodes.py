@@ -669,3 +669,57 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ChaoticH3CompositePatch": "Chaotic H3 Composite Patch",
     "ChaoticH3PromptAssembler": "Chaotic H3 Prompt Assembler",
 }
+
+
+# --------------------------------------------------------------------------- #
+# Shared crops bundle API
+# --------------------------------------------------------------------------- #
+# The Video Edit widget exports its ⧉ Copy-to-ref crops here (POST); the
+# Director and Mockup widgets fetch them (GET) to drop the crops into the
+# reference library / stage as layers.  The manifest lives in the input dir so
+# it survives reloads, and the uploads behind it use the same `/upload/image`
+# endpoint the import buttons already use — so no crop is ever duplicated.
+
+
+def _register_crops_api() -> None:
+    """Attach the /chaotic_h3/crops routes to the live ComfyUI server.
+
+    ComfyUI's main creates the PromptServer before custom nodes are imported,
+    so `instance` is set exactly when these routes can be attached.  Outside a
+    server (unit tests, standalone scripts) this is a clean no-op.
+    """
+    try:
+        from aiohttp import web  # noqa: PLC0415
+        from server import PromptServer  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 — no server in this environment
+        return
+
+    srv = getattr(PromptServer, "instance", None)
+    if srv is None:
+        return
+
+    try:
+        from .crops import load_crops_bundle, save_crops_bundle  # noqa: PLC0415
+    except Exception as e:  # noqa: BLE001 — a real pack bug; say so
+        print(f"[ChaoticMinimaxH3Director] crops API disabled: {e}")
+        return
+
+    @srv.routes.post("/chaotic_h3/crops")
+    async def _save_crops(request):
+        try:
+            data = await request.json()
+        except Exception:  # noqa: BLE001
+            return web.json_response(
+                {"status": "error", "message": "invalid JSON body"}, status=400
+            )
+        crops = data.get("crops") if isinstance(data, dict) else None
+        result = save_crops_bundle(crops)
+        status = 200 if result.get("status") == "ok" else 500
+        return web.json_response(result, status=status)
+
+    @srv.routes.get("/chaotic_h3/crops")
+    async def _load_crops(request):  # noqa: ARG001
+        return web.json_response(load_crops_bundle())
+
+
+_register_crops_api()

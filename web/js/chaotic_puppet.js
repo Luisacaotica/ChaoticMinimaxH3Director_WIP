@@ -446,6 +446,8 @@ class ChaoticPuppetEditor {
     toolbar.className = "pup-toolbar";
     const btnImg = this.btn("⬆ Image", () => this.pickFiles("image"));
     const btnVid = this.btn("⬆ Video", () => this.pickFiles("video"));
+    const btnCrops = this.btn("📥 Crops", () => this.importCrops());
+    btnCrops.title = "import the crops exported from Chaotic H3 Video Edit (⤴ Export crops) as image layers — pose them on the stage.";
     const btnText = this.btn("T Text", () => this.addTextLayer());
     const btnSave = this.btn("Save", () => this.saveProject());
     const btnLoad = this.btn("Load", () => this.loadProject());
@@ -1654,6 +1656,58 @@ class ChaoticPuppetEditor {
     } catch (err) {
       console.error("[ChaoticPuppet] import failed", err);
       this.updateStatus("Import failed: " + (err && err.message ? err.message : err));
+    }
+  }
+
+  async importCrops() {
+    try {
+      const resp = await api.fetchApi("/chaotic_h3/crops");
+      if (resp.status !== 200) {
+        this.updateStatus("Could not load exported crops (" + resp.status + ").");
+        return;
+      }
+      const data = await resp.json();
+      const crops = (data && data.crops) || [];
+      if (!crops.length) {
+        this.updateStatus("No exported crops found — copy crops in Chaotic H3 Video Edit, then press ⤴ Export crops there.");
+        return;
+      }
+      let added = 0;
+      let skipped = 0;
+      for (const c of crops) {
+        if (!c || !c.file) continue;
+        if (this.state.layers.some(l => l.file === c.file)) {
+          skipped++; // already on the stage — never duplicate a layer
+          continue;
+        }
+        const layer = this.normalizeLayer({
+          id: uid("layer"),
+          type: "image",
+          name: c.note ? c.note : "crop @" + (c.at != null ? c.at : 0) + "s",
+          file: c.file,
+          x: 0.5,
+          y: 0.5,
+          scale: 1,
+          rotation: 0,
+          opacity: 1,
+          keys: [],
+        }, this.state.layers.length);
+        this.state.layers.unshift(layer); // crops land on top, like any new sprite
+        this.selectedId = layer.id;
+        this.preloadSprite(layer);
+        added++;
+      }
+      if (added) {
+        this.commitChanges();
+        this.refreshLayerList();
+        this.buildInspector();
+      }
+      const msg = skipped > 0
+        ? "Imported " + added + " crop(s) — " + skipped + " already on the stage, skipped."
+        : "Imported " + added + " crop(s) as image layers — pose them on the stage (opacity = reference strength).";
+      this.updateStatus(msg);
+    } catch (err) {
+      this.updateStatus("Import crops failed: " + (err && err.message ? err.message : err));
     }
   }
 

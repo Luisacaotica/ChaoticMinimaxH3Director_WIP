@@ -233,6 +233,29 @@ function check(name, cond, extra) {
   check("reserialize keeps render window", serialized.render_in === 2.0 && serialized.render_out === 9.0);
   check("reserialize keeps timed flags", serialized.refs.find(r => r.id === "ref_lib").timed === false);
 
+  /* cross-node crops import (Video Edit ⤴ Export crops -> library cards) */
+  const cropsBefore = ed.state.refs.length;
+  const wsOrigFetch = apiMock.fetchApi;
+  apiMock.fetchApi = async (path) => {
+    if (path === "/chaotic_h3/crops") {
+      return { status: 200, json: async () => ({ crops: [
+        { file: "ve_crop_1.png", at: 1.5, note: "face" },
+        { file: "sub/ve_crop_2.png", at: 3.2, note: "" },
+      ] }) };
+    }
+    return wsOrigFetch(path);
+  };
+  await ed.importCrops();
+  check("importCrops adds library Picture refs", ed.state.refs.length === cropsBefore + 2, "refs=" + ed.state.refs.length);
+  const cropRef = ed.state.refs[cropsBefore];
+  check("imported crop is an untimed picture card", !!cropRef && cropRef.kind === "picture" && cropRef.tag_type === "picture" && cropRef.timed === false && cropRef.file === "ve_crop_1.png" && cropRef.name === "face", JSON.stringify(cropRef));
+  check("imported crop thumb is subfolder-aware", (ed.state.refs[cropsBefore].thumb || "").indexOf("view?filename=ve_crop_1.png") !== -1 && (ed.state.refs[cropsBefore + 1].thumb || "").indexOf("subfolder=sub") !== -1, ed.state.refs[cropsBefore].thumb);
+  await ed.importCrops(); // same bundle again -> dedupe, no new cards
+  check("importCrops dedupes already-imported crops", ed.state.refs.length === cropsBefore + 2, "refs=" + ed.state.refs.length);
+  apiMock.fetchApi = wsOrigFetch;
+  await ed.importCrops(); // dumb mock has no crops -> graceful
+  check("importCrops without a bundle warns gracefully", (ed.statusLine.textContent || "").indexOf("No exported crops") !== -1, ed.statusLine.textContent);
+
   /* new interactions: playhead scrub + library placement toggle */
   let scrubbed = null;
   try { ed.setPlayhead(3.5); scrubbed = ed.playhead; } catch (e) { scrubbed = "THREW: " + e.message; }

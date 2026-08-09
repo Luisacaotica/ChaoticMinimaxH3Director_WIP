@@ -132,6 +132,7 @@ const sandbox = {
   app: appMock,
   Image: FakeImage,
   FormData: class { append() {} },
+  fetch: () => Promise.resolve({ blob: () => Promise.resolve(new Blob(["x"], { type: "image/png" })) }),
   navigator: {},
   performance: { now: () => Date.now() },
   requestAnimationFrame() { return 0; },
@@ -508,9 +509,29 @@ function check(name, cond, extra) {
   ed.playhead = 1.25;
   await ed.copyToReference();
   check("copyToReference adds a ref crop", ed.state.refs.length === 1 && ed.state.refs[0].src.length > 0 && ed.state.refs[0].at === 1.25, "refs=" + ed.state.refs.length);
-  check("refs row renders a thumb", ed.refsRow.style.display === "flex" && ed.refsRow.children.length === 1);
+  check("copyToReference uploads the crop for cross-node import", ed.state.refs[0].file === "clip.mp4" && (ed.state.refs[0].thumb || "").indexOf("view?filename=clip.mp4") !== -1, "file=" + ed.state.refs[0].file);
+  check("refs row renders a thumb", ed.refsRow.style.display === "flex" && ed.refsRow.children.length === 2);
+  let postedCrops = null;
+  const veOrigFetch = apiMock.fetchApi;
+  apiMock.fetchApi = async (path, opts) => {
+    if (path === "/chaotic_h3/crops" && opts && opts.method === "POST") {
+      postedCrops = JSON.parse(opts.body || "{}");
+      return { status: 200, json: async () => ({ status: "ok" }) };
+    }
+    return veOrigFetch(path, opts);
+  };
+  await ed.exportCrops();
+  check("exportCrops posts the crops bundle", !!postedCrops && Array.isArray(postedCrops.crops) && postedCrops.crops.length === 1 && postedCrops.crops[0].file === "clip.mp4" && postedCrops.crops[0].at === 1.25, JSON.stringify(postedCrops));
+  check("export reports the count", (ed.statusLine.textContent || "").indexOf("Exported 1 crop(s)") !== -1, ed.statusLine.textContent);
+  apiMock.fetchApi = veOrigFetch;
+  ed.state.refs.push({ src: "AAAA", file: "", at: 2.0, note: "" });
+  await ed.exportCrops();
+  check("exportCrops reports skipped file-less crops", (ed.statusLine.textContent || "").indexOf("have no uploaded file") !== -1, ed.statusLine.textContent);
+  ed.removeRef(1);
   ed.removeRef(0);
   check("removeRef clears the strip", ed.state.refs.length === 0 && ed.refsRow.style.display === "none");
+  await ed.exportCrops();
+  check("exportCrops without uploadable crops warns", (ed.statusLine.textContent || "").indexOf("Nothing to export") !== -1, ed.statusLine.textContent);
 
   /* fresh node path */
   (async () => {

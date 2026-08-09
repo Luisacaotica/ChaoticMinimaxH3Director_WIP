@@ -374,6 +374,29 @@ function check(name, cond, extra) {
     ksdThrew ? ksdThrew.message : "sel=" + ed.selectedId);
   ed.selectedId = null;
 
+  /* cross-node crops import (Video Edit ⤴ Export crops -> stage layers) */
+  const cropsBefore = ed.state.layers.length;
+  const pupOrigFetch = apiMock.fetchApi;
+  apiMock.fetchApi = async (path) => {
+    if (path === "/chaotic_h3/crops") {
+      return { status: 200, json: async () => ({ crops: [
+        { file: "ve_crop_1.png", at: 1.5, note: "face" },
+        { file: "ve_crop_2.png", at: 3.2, note: "" },
+      ] }) };
+    }
+    return pupOrigFetch(path);
+  };
+  await ed.importCrops();
+  check("importCrops adds image layers", ed.state.layers.length === cropsBefore + 2, "layers=" + ed.state.layers.length);
+  const cropLayer = ed.state.layers[0]; // unshifted -> crops on top
+  check("imported crop layer is an image with file + note name", !!cropLayer && cropLayer.type === "image" && cropLayer.file === "ve_crop_2.png" && cropLayer.name === "crop @3.2s", JSON.stringify(cropLayer));
+  check("import selects the newest crop layer", ed.selectedId === cropLayer.id);
+  await ed.importCrops(); // same bundle again -> dedupe, no new layers
+  check("importCrops dedupes already-imported crops", ed.state.layers.length === cropsBefore + 2, "layers=" + ed.state.layers.length);
+  apiMock.fetchApi = pupOrigFetch;
+  await ed.importCrops(); // dumb mock has no crops -> graceful
+  check("importCrops without a bundle warns gracefully", (ed.statusLine.textContent || "").indexOf("No exported crops") !== -1, ed.statusLine.textContent);
+
   /* fresh node path */
   (async () => {
     const NodeType2 = function () {
