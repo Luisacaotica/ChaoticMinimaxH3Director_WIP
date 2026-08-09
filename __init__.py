@@ -9,6 +9,7 @@ video+audio clip.
 Nodes:
   * ChaoticH3Director           — the timeline editor + chunked renderer
   * ChaoticH3PromptAssembler    — pure prompt/plan preview (no GPU)
+  * ChaoticH3RadioPlayPlanner   — audio-only radio-play recipe planner (no GPU)
 
 Category: Chaotic/H3 Director
 """

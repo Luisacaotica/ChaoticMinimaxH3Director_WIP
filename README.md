@@ -55,6 +55,7 @@ It is a **conductor, not an engine**: every model patch in your graph — turbo 
 | 🔲 **Reframe (outpaint) mode** | Reframe a clip to a new aspect ratio — vertical phone shot → 16:9 widescreen, and beyond. Pick a target (9:16 / 16:9 / 4:3 / 1:1 / 21:9 presets or custom W×H), place the source window with H/V align (or **✥ drag it anywhere** on the canvas), and the node outputs a **target-canvas plate** with the *outside* region masked for outpaint (feather softens the boundary). The **✥ Move window** tool has real transform handles: drag the body to move, the **↻ knob** to rotate (−180…180°, Shift snaps to 45°), and the **▢ corner** to scale (0.1×–4×, Shift snaps to 10%) — an oversized window pins its center inside the canvas while it overflows, and the preview stays pixel-identical to the plate (verified against the Python geometry). A **Fit** toggle switches between **Contain** (fill the tight axis at 100% size, max resolution) and **Smaller** (base fit × 0.8, so the window keeps margin on *both* axes at 100% — the move tool can then place it anywhere in 2D, like a picture-in-picture or a floating subject, instead of being pinned to an edge). Brush strokes over **people/objects crossing the edge** mark them as **preserve** regions — or press **🛰 Auto-preserve** and the built-in NCC tracker detects edge-crossing objects automatically (motion blobs in the edge band → template-locked, tracked forward + backward through the clip, written as soft-edged preserve mask keys; scan stride + max objects are tunable). **🎯 Track subject** makes the window *follow the subject*: paint the subject once with the preserve brush, press it, and the same NCC tracker keys the window position across the whole clip — scrub to see the window slide to keep them framed (each key is a real frame; drag the window to add/override a key at the playhead, ✕ Clear track to return to static). Composite the reframed result back with the patch node. |
 | 🧷 **Copy to reference** | Grab exactly what you're editing: in the Video Edit node, draw a rectangle and press **⧉ Copy to ref** — the crop becomes a reference image (thumbnails strip with delete) and is decoded into a new **`ref_images`** IMAGE output you can wire straight into H3's reference inputs for precision edits/removals. In the Director, **⧉ Copy to ref** in the preview strip captures the frame under the playhead into the reference library as a `<Picture N>` card. **Crops travel between nodes**: every Video Edit crop is also uploaded to ComfyUI's input folder, and **⤴ Export crops** writes them to a shared bundle (`input/chaotic_h3_crops.json`) — the Director's **📥 Crops** toolbar button drops them into the reference library as draggable `<Picture N>` cards (into any prompt or onto the timeline), and the Mockup Editor's **📥 Crops** adds them as stage layers. Imports are deduplicated by file, and file-less legacy crops are reported rather than silently dropped. |
 | 🧪 **Zero-GPU prompt preview** | The companion `ChaoticH3PromptAssembler` node prints the exact per-chunk prompts + chunk plan without spending a single render. |
+| 🎙️ **Radio Play Planner** | `ChaoticH3RadioPlayPlanner` — a pure, no-GPU node that turns a radio-play script into the community **audio-only** H3 recipe: 32×32 latents (all capacity into the audio stream), the script split into ≤15 s segments on the 17k+5 frame grid, word-budgeted dialogue (~2.5 spoken words/s so nothing sounds rushed or mumbled), voices bound to the reference-video **soundtrack** slots (`<Video 1/2/3>`) with `ref_audio` left **empty** (the trick that restores an ambient bed under referenced voices), and a full six-part Ref2VA prompt per segment with a byte-identical `overall_soundscape` so the seams hide. It counts words before it counts segments, auto-appends an explicit final event ("…this is the final sound, no speech after") unless you wrote one, and prints the trim-150 ms / crossfade-150 ms assembly recipe. |
 
 ---
 
@@ -70,6 +71,51 @@ Restart ComfyUI. The nodes appear in the **`Chaotic/H3 Director`** menu and the 
 **No extra Python dependencies.** The engine reuses `av`, `torchaudio`, `numpy` and `torch` already shipped with your ComfyUI install.
 
 > The stock `MiniMaxH3ReferenceToVideo` node (or Deno variant) does **not** need to be in the graph anymore — the Director replicates its conditioning path internally, then adds chunking, seam anchoring and stitching on top.
+
+---
+
+## 🎙️ Radio Play Planner (audio-only mode)
+
+MiniMax H3 is omni-modal: it generates video *and* audio in one latent stream. Set the video latent to **32×32** and nearly all the model's capacity goes into the audio — a full **radio play** with distinct, reference-consistent voices and a continuous ambient bed, generated locally, no video needed. The recipe below is reverse-engineered in the community write-up (see [Credits](#-credits--prior-art)); the `ChaoticH3RadioPlayPlanner` node applies it for you.
+
+**The recipe (what the planner outputs):**
+
+1. **Audio-only latents** — 32×32, so the video stream is trivial and the audio gets the compute.
+2. **≤15 s segments** — H3's native output window is ~4–15 s; past that quality collapses. Frames snap to the **17k+5** grid: `max(5, round(seconds * fps)) + (5 - (max(5, round(seconds * fps)) % 17)) % 17` (15 s @ 24 fps → **362 frames**).
+3. **Word budget** — natural conversation is ~2–2.5 spoken words/s; a dialogue-dense 15 s clip holds ~30–38 words. Over budget → rushed, clipped lines; under budget → invented mumbling. *Count words before you count segments.*
+4. **Explicit endings** — never tell the model *when* to stop; tell it *what* it ends on: "Finally, … This is the final sound. No speech occurs after this." The planner auto-appends this per segment (and keeps yours if you wrote one).
+5. **Voice casting** — one neutral in-character sample per character, generated in isolation; bind declaratively in `subject_definitions:` (`<Video 1> is the voice timbre reference for Priya (S1) …`), keep the same `(Sx)` IDs across segments, and state their dialogue is *not* carried into the target.
+6. **The ambience fix** — wire voice samples into the reference-video **soundtrack slots** (`refvideoaudios 0/1/2` → `<Video 1/2/3>`), keep **`ref_audio` empty**. Voices in `ref_audio` produce dry studio speech with no bed; in the soundtrack slots they mix over a prompt-written bed.
+7. **Identical soundscape** — the `overall_soundscape:` paragraph is byte-identical in every segment so the joins are invisible.
+8. **Assembly** — trim 50–200 ms off every segment head (boundary ghost) and crossfade ~150 ms on the joins. `res_multistep` + `beta`, ~30 steps, fp32 audio VAE.
+
+**Script format** (paste into the `script` input):
+
+```
+# Cast
+S1: Priya, a warm, teasing woman in her late twenties.
+S2: Marcus, a deep-voiced, gravelly older man.
+S3: Ethan, a younger man with a dry, deadpan delivery.
+
+# Scene
+Three friends camped by a small fire in a pine forest at night.
+
+# Ambience
+Continuous campfire crackle, light wind through pine trees, occasional insects…
+
+# Music
+N/A
+
+Priya (S1) says, [teasing, bright]: "You were the one who said, let's experience the wilderness." [giggles]
+Marcus (S2) replies, [gravelly, amused]: "And I stand by it."
+[An owl screeches close by, startling all three.]
+…
+Finally, the fire crackles low and the wind gentles. This is the final sound. No speech occurs after this.
+```
+
+Sections are optional (`# Cast`, `# Scene`/`# Setting`, `# Ambience`/`# Soundscape`, `# Music`, `# Dialogue`/`# Script`); `[bracket]` lines are stage directions / sound effects ("[Two seconds of only fire and wind.]" becomes a 2 s beat), and bracketed cues after dialogue (`[giggles]`) become vocalizations. Undeclared speakers are auto-registered with a note.
+
+**Outputs:** `recipe_json` (per-segment frames/words/beats + the wiring, sampler and post-recipe), `segment_prompts` (the full six-part prompt per segment, ready to paste), `segment_count`, and `issues` (word-budget overruns, under-filled segments, missing ambience, cast > slots, beats past the native window).
 
 ---
 
@@ -273,12 +319,14 @@ Not possible — H3 always produces a video+audio pair (hard model limitation, n
 ## 🚫 Non-goals
 
 - Not a general video editor (no color grading, transitions, effects).
-- Not audio-only output (hard model limitation).
+- Not a replacement for the `ChaoticH3RadioPlayPlanner`'s manual assembly — the audio-only recipe is generated by the planner node; the Director itself renders video.
 - Local-only — no cloud/API MiniMax H3.
 
 ---
 
 ## 🙏 Credits & prior art
+
+The **Radio Play Planner** implements the community-reverse-engineered recipe for audio-only MiniMax H3 generation (32×32 audio-only latents, ≤15 s word-budgeted segments on the 17k+5 grid, voices in the reference-video soundtrack slots with `ref_audio` empty, explicit final events, crossfaded assembly).
 
 - **MiniMax H3** official prompting guide and [Comfy-Org reference implementation](https://huggingface.co/Comfy-Org/MiniMax-H3) — ground truth for prompt structure, retention vocabulary, and reference semantics.
 - **LTX "Director"** — the timeline-track UX inspiration.

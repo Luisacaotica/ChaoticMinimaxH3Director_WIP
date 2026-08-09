@@ -30,6 +30,7 @@ from .chunking import (
 from .engine import ChunkRenderer
 from .mockup import default_scene_json, parse_scene, render_scene
 from .prompt_assembly import assemble_chunk_prompt
+from .radio_play import DEFAULT_RADIO_SCRIPT, plan_radio_play
 from .stitching import as_video_batch, stitch_chunks
 from .video_edit import (
     VOID_COLORS,
@@ -660,12 +661,60 @@ class ChaoticPromptAssembler:
         )
 
 
+class ChaoticRadioPlayPlanner:
+    """Audio-only MiniMax H3 radio-play recipe planner (zero GPU).
+
+    Turns a radio-play script into the community "radio play" recipe:
+    32x32 audio-only latents, the script split into <=15 s segments on the
+    17k+5 frame grid, word-budgeted dialogue (~2.5 words/s), voices bound to
+    the reference-video *soundtrack* slots (<Video N>) with ref_audio left
+    empty, and a full six-part Ref2VA prompt per segment with a
+    byte-identical overall_soundscape so the seams hide.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "script": (
+                    "STRING",
+                    {"default": DEFAULT_RADIO_SCRIPT, "multiline": True},
+                ),
+                "fps": ("INT", {"default": 24, "min": 1, "max": 60}),
+                "max_segment_seconds": ("FLOAT", {"default": 15.0, "min": 4.0, "max": 15.0, "step": 0.5}),
+                "words_per_second": ("FLOAT", {"default": 2.5, "min": 1.5, "max": 4.0, "step": 0.1}),
+                "voice_slots": ("INT", {"default": 3, "min": 1, "max": 6}),
+                "music": ("STRING", {"default": "", "multiline": True}),
+                "final_event": ("BOOLEAN", {"default": True}),
+            },
+        }
+
+    RETURN_TYPES = ("STRING", "STRING", "INT", "STRING")
+    RETURN_NAMES = ("recipe_json", "segment_prompts", "segment_count", "issues")
+    FUNCTION = "plan"
+    CATEGORY = "Chaotic/H3 Director"
+
+    def plan(self, script, fps, max_segment_seconds, words_per_second,
+             voice_slots, music, final_event):
+        recipe_json, prompts, count, issues = plan_radio_play(
+            script_text=script,
+            fps=int(fps),
+            max_segment_seconds=float(max_segment_seconds),
+            words_per_second=float(words_per_second),
+            voice_slots=int(voice_slots),
+            final_event=bool(final_event),
+            music=music,
+        )
+        return (recipe_json, prompts, count, issues)
+
+
 NODE_CLASS_MAPPINGS = {
     "ChaoticH3Director": ChaoticDirector,
     "ChaoticH3MockupEditor": ChaoticH3MockupEditor,
     "ChaoticH3VideoEdit": ChaoticH3VideoEdit,
     "ChaoticH3CompositePatch": ChaoticH3CompositePatch,
     "ChaoticH3PromptAssembler": ChaoticPromptAssembler,
+    "ChaoticH3RadioPlayPlanner": ChaoticRadioPlayPlanner,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
@@ -674,6 +723,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "ChaoticH3VideoEdit": "Chaotic H3 Video Edit",
     "ChaoticH3CompositePatch": "Chaotic H3 Composite Patch",
     "ChaoticH3PromptAssembler": "Chaotic H3 Prompt Assembler",
+    "ChaoticH3RadioPlayPlanner": "Chaotic H3 Radio Play Planner",
 }
 
 
