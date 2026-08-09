@@ -185,6 +185,7 @@ class ChaoticPuppetEditor {
     this._lastWidth = 0;
     this._lastScale = 0;
     this._raf = null;
+    this._resizeRaf = null;
     this._lastTick = 0;
     this._imgCache = {};
     this._videoEls = {};
@@ -215,7 +216,7 @@ class ChaoticPuppetEditor {
     this.wireSizeWidgets();
     this.loadState();
     this.buildDOM();
-    this._raf = requestAnimationFrame(() => this.checkResize());
+    // The resize loop starts only when the fullscreen editor opens.
   }
 
   get fps() { return parseInt((this.fpsWidget && this.fpsWidget.value) || 24, 10) || 24; }
@@ -836,8 +837,9 @@ class ChaoticPuppetEditor {
       this.drawKeyStrip();
       this.drawAudioWave();
     }
-    if (this.playing) this._raf = requestAnimationFrame(() => this.checkResize());
-    else this._raf = requestAnimationFrame(() => this.checkResize());
+    this._resizeRaf = this.modal && this.modal.classList.contains("open")
+      ? requestAnimationFrame(() => this.checkResize())
+      : null;
   }
 
   /* ---------------- stage drawing ---------------- */
@@ -2498,10 +2500,10 @@ function setupPuppetModal(editor, container) {
       head.append(title, close, save); editor.modalBody = document.createElement("div"); editor.modalBody.className = "pup-modal-body"; editor.modal.append(head, editor.modalBody); if (document.body) document.body.appendChild(editor.backdrop); if (document.body) document.body.appendChild(editor.modal);
       editor._escHandler = e => { if (e.key === "Escape" && editor.modal.classList.contains("open")) editor.closeModal(true); }; if (document.addEventListener) document.addEventListener("keydown", editor._escHandler);
     }
-    editor.modalBody.appendChild(editor.wrapper); editor.backdrop.classList.add("open"); editor.modal.classList.add("open"); editor._lastWidth = 0; editor._lastScale = 0; requestAnimationFrame(() => editor.checkResize());
+    editor.modalBody.appendChild(editor.wrapper); editor.backdrop.classList.add("open"); editor.modal.classList.add("open"); editor._lastWidth = 0; editor._lastScale = 0; if (!editor._resizeRaf) editor._resizeRaf = requestAnimationFrame(() => editor.checkResize());
   };
-  editor._closeModal = save => { if (save) editor.commitChanges(); if (editor.modal) editor.modal.classList.remove("open"); if (editor.backdrop) editor.backdrop.classList.remove("open"); refresh(); };
-  editor._destroyModal = () => { if (editor._escHandler && document.removeEventListener) document.removeEventListener("keydown", editor._escHandler); if (editor.modal && editor.modal.remove) editor.modal.remove(); if (editor.backdrop && editor.backdrop.remove) editor.backdrop.remove(); };
+  editor._closeModal = save => { if (save) editor.commitChanges(); if (editor.modal) editor.modal.classList.remove("open"); if (editor.backdrop) editor.backdrop.classList.remove("open"); if (editor._resizeRaf) { cancelAnimationFrame(editor._resizeRaf); editor._resizeRaf = null; } refresh(); };
+  editor._destroyModal = () => { if (editor._resizeRaf) { cancelAnimationFrame(editor._resizeRaf); editor._resizeRaf = null; } if (editor._escHandler && document.removeEventListener) document.removeEventListener("keydown", editor._escHandler); if (editor.modal && editor.modal.remove) editor.modal.remove(); if (editor.backdrop && editor.backdrop.remove) editor.backdrop.remove(); };
   button.addEventListener("click", () => editor.openModal());
 }
 

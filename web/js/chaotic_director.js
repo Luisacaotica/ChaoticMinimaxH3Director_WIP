@@ -252,7 +252,7 @@ class ChaoticDirectorEditor {
 
     this.loadState();
     this.buildDOM();
-    this._renderLoop = requestAnimationFrame(() => this.checkResize());
+    this._renderLoop = null; // only active while the fullscreen editor is open
   }
 
   defaultProject() {
@@ -488,7 +488,9 @@ class ChaoticDirectorEditor {
       this.ctx.setTransform(scale, 0, 0, scale, 0, 0);
       this.renderTimeline();
     }
-    this._renderLoop = requestAnimationFrame(() => this.checkResize());
+    this._renderLoop = this.modal && this.modal.classList.contains("open")
+      ? requestAnimationFrame(() => this.checkResize())
+      : null;
   }
 
   /* ---------------- DOM ---------------- */
@@ -3212,10 +3214,10 @@ function setupDirectorModal(editor, container) {
       if (document.addEventListener) document.addEventListener("keydown", editor._escHandler);
     }
     editor.modalBody.appendChild(editor.wrapper); editor.backdrop.classList.add("open"); editor.modal.classList.add("open");
-    editor._lastWidth = 0; editor._lastScale = 0; requestAnimationFrame(() => editor.checkResize());
+    editor._lastWidth = 0; editor._lastScale = 0; if (!editor._renderLoop) editor._renderLoop = requestAnimationFrame(() => editor.checkResize());
   };
-  editor._closeModal = save => { if (save) editor.commitChanges(); if (editor.modal) editor.modal.classList.remove("open"); if (editor.backdrop) editor.backdrop.classList.remove("open"); refresh(); };
-  editor._destroyModal = () => { if (editor._escHandler && document.removeEventListener) document.removeEventListener("keydown", editor._escHandler); if (editor.modal && editor.modal.remove) editor.modal.remove(); if (editor.backdrop && editor.backdrop.remove) editor.backdrop.remove(); };
+  editor._closeModal = save => { if (save) editor.commitChanges(); if (editor.modal) editor.modal.classList.remove("open"); if (editor.backdrop) editor.backdrop.classList.remove("open"); if (editor._renderLoop) { cancelAnimationFrame(editor._renderLoop); editor._renderLoop = null; } refresh(); };
+  editor._destroyModal = () => { if (editor._renderLoop) { cancelAnimationFrame(editor._renderLoop); editor._renderLoop = null; } if (editor._escHandler && document.removeEventListener) document.removeEventListener("keydown", editor._escHandler); if (editor.modal && editor.modal.remove) editor.modal.remove(); if (editor.backdrop && editor.backdrop.remove) editor.backdrop.remove(); };
   button.addEventListener("click", () => editor.openModal());
 }
 
