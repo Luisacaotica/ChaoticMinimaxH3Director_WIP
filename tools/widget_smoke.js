@@ -90,6 +90,7 @@ function makeElement(tag) {
 
 const documentMock = {
   createElement: (tag) => makeElement(tag),
+  createTextNode: (text) => ({ nodeType: 3, textContent: String(text) }),
   getElementById: () => null,
   head: { appendChild() {} },
   body: { appendChild() {} },
@@ -245,6 +246,31 @@ function check(name, cond, extra) {
   try { ed.clearRenderRange(); } catch (e) { check("clearRenderRange did not throw", false, e.message); }
   check("clearRenderRange clears window", ed.renderIn === null && ed.renderOut === null);
   ed.renderIn = 2.0; ed.renderOut = 9.0; // restore for later round-trip checks
+
+  /* library drag-to-timeline + tag suggestion */
+  let placedAt = null;
+  try { ed.placeRefOnTimeline("ref_lib", 2.5); placedAt = ed.refById("ref_lib"); } catch (e) { placedAt = "THREW: " + e.message; }
+  check("placeRefOnTimeline places at the drop time", typeof placedAt === "object" && placedAt.timed === true && Math.abs(placedAt.start - 2.5) < 1e-6,
+    "start=" + (placedAt && placedAt.start));
+  let suggested = null;
+  let expectedTag = null;
+  try {
+    ed.selectedType = "shot";
+    ed.selectedId = "shot_a";
+    expectedTag = ed.globalTags()["ref_lib"];
+    ed.suggestToPrompt("ref_lib");
+    suggested = ed.state.shots.find(s => s.id === "shot_a").text;
+  } catch (e) { suggested = "THREW: " + e.message; }
+  check("suggestToPrompt appends the ref's tag to the shot", typeof suggested === "string" && expectedTag && suggested.includes(expectedTag),
+    "tag=" + expectedTag);
+  let suggestNoShot = null;
+  try {
+    ed.selectedType = null;
+    ed.selectedId = null;
+    ed.suggestToPrompt("ref_lib");
+    suggestNoShot = true;
+  } catch (e) { suggestNoShot = "THREW: " + e.message; }
+  check("suggestToPrompt warns without a selected shot", suggestNoShot === true, "" + suggestNoShot);
 
   /* fresh-node path (empty timeline_data) must also construct */
   (async () => {

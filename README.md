@@ -43,13 +43,15 @@ It is a **conductor, not an engine**: every model patch in your graph — turbo 
 | 🔗 **Frame-accurate seams** | `keyframe+picture` (default): previous chunk's last frame is both a geometric I2VA keyframe re-injected at frame 0 *during* sampling, and a `<Picture N>` reference. The "last-frame glitch" class of bug is avoided by design — keyframes are never appended to the latent tail, so no trailing guide frames need cropping. |
 | 🎞️ **Video context continuity** | Optionally feed the whole previous chunk as a `<Video N>` weak reference, so hard-cut multi-angle scenes keep motion/energy/lighting continuity across cuts. |
 | 🎥 **Scrub + preview** | Drag on the ruler to scrub: the video frame / picture under the playhead renders in a live preview strip (play the trim range, or click any ref's **Preview** button). Make precision cuts against the actual footage. |
-| 📚 **Reference library** | Drop media that is *just a reference* (look-and-feel, mood, subject sheets) into the library panel — it never appears on the timeline, but stays available to **every** shot as `<Picture N>`/`<Video N>`/`<Audio N>`. Timeline media and reference media never mix. |
+| 📚 **Reference library** | Drop media that is *just a reference* (look-and-feel, mood, subject sheets) into the library panel — it never appears on the timeline, but stays available to **every** shot as `<Picture N>`/`<Video N>`/`<Audio N>`. Timeline media and reference media never mix. Library cards are **draggable**: drag onto the timeline to place (it becomes a shot), drag onto the prompt box to insert its tag reference — no mixing, two destinations, one gesture. |
 | ✂️ **Render window (IN/OUT)** | Sony-Vegas style: set IN/OUT on the ruler (or at the playhead) and render **only that range** — iterate a single scene without re-rendering the whole project. The window is drawn, shaded and saved with the project. |
 | 💾 **Project save / load** | Export the whole timeline (shots, refs, strengths, boundaries, render window) to a `.json` project file and load it back — or keep it in the workflow, since the editor already serializes into `timeline_data`. |
 | 🎼 **Prompt formats** | Both verified H3 formats: the official field structure (`subject_definitions → summary → retention_analysis → detailed_description [Shot N]/MM:SS.sss → overall_soundscape → non_diegetic_music`) and the looser narrative scene-block format — switchable per project **and** per shot. |
 | 🎬 **Editing mode** | Character swap, restyle, motion/expression transfer, audio style transfer — import the clip being edited with a "source" role, distinct from reference/mood-donor clips. |
 | 📝 **Reference annotations** | Free-text notes per reference that flow into `subject_definitions:` (personality, voice, attributes the image doesn't show). |
-| 🎭 **Mockup Editor (puppet stage)** | A separate node: compose PNG sprites, text, and video clips as layers, keyframe their position/scale/rotation/opacity (opacity = reference strength), add cuts by when layers appear, and scrub with an audio track. One-click **aspect presets** (16:9 / 9:16 / 1:1) set the stage and the render size to match the target format — portrait phone clips or square social posts compose exactly as they'll render. Per-key **easing** (linear / ease-in / ease-out / ease-in-out / hold) gives smooth, bezier-like motion — or stepped cuts — with the interpolation curve drawn right on the keyframe strip. Render the crude animation and wire it into the Director's `mockup` input — MiniMax H3 reads the composition, positions, and motion off the mockup and turns it into a finished clip. |
+| 🎭 **Mockup Editor (puppet stage)** | A separate node: compose PNG sprites, text, and **RGBA video** clips as layers, keyframe their position/scale/rotation/opacity (opacity = reference strength), add cuts by when layers appear, and scrub with an audio track. One-click **aspect presets** (16:9 / 9:16 / 1:1) set the stage and the render size to match the target format — portrait phone clips or square social posts compose exactly as they'll render. Per-key **easing** (linear / ease-in / ease-out / ease-in-out / hold) gives smooth, bezier-like motion — or stepped cuts — with the interpolation curve drawn right on the keyframe strip. 🖱️ **Mouse recording** (Cinema 4D Cappuccino-style): hit REC, move the layer with the mouse, and a take of position/size/rotation keys is laid down automatically — record each channel separately for fast iteration. Render the crude animation and wire it into the Director's `mockup` input — MiniMax H3 reads the composition, positions, and motion off the mockup and turns it into a finished clip. |
+| 🎬 **Chaotic H3 Video Edit** | A dedicated video-edit node: scrub a real video with frame-accurate preview, paint **brush or square masks**, keyframe the mask over time (it cross-fades between keys — growing/shrinking/rotating a region), then choose: **inpaint** the masked area or the area *outside* it. Two output modes: **plate** (the region on a black/green void — perfect for cleaning a plate or a local hires-fix of a face/hand) and **crop** (only the masked region, at full or selected resolution, aspect-locked). Wire the masked plate + mask into a ComfyUI H3 inpaint pass, then **Chaotic H3 Composite Patch** pastes the AI result back onto the source video. |
+| 🟢 **Green-screen mode** | The Video Edit node can **chroma-key** instead: RGBA `IMAGE` + alpha `MASK` outputs with spill suppression, plus a checkerboard preview — see the transparency right on the timeline. Feed the keyed character into the Mockup Editor (RGBA video layer) and keyframe a background behind it to match lighting. |
 | 🧪 **Zero-GPU prompt preview** | The companion `ChaoticH3PromptAssembler` node prints the exact per-chunk prompts + chunk plan without spending a single render. |
 
 ---
@@ -111,7 +113,21 @@ Open a **Chaotic H3 Mockup Editor** node (under `Chaotic/H3 Director`) to sketch
 
 The Director then feeds every chunk its slice of the mockup as a `fully_preserved <Video N>` storyboard reference — H3 reproduces the layout, positions, layering, and motion as the blueprint for the final clip. It will look like a bad mockup — that's the point.
 
-### 4. Convert your existing workflow in one command
+> **REC (mouse recording)** — hit **REC** in the toolbar, select the channels you want to capture (Position / Size / Rotation), and just move the layer on the stage with the mouse. A take of keyframes is laid down at the capture rate — record each channel separately, Cappuccino-style, for fast iteration. REC turns itself off when you release the mouse.
+
+### 4. Video Edit → inpaint → composite
+
+Open a **Chaotic H3 Video Edit** node — this one is *only* about editing existing footage:
+
+1. Feed it a video (or load one in the widget) and **scrub** with the ruler — the exact frame is previewed so you can make precision cuts.
+2. Paint a **brush** or **square** mask on the frame. Keyframe the mask over time (it cross-fades between keys, so a box can grow/shrink/travel). Pick **inpaint** (edit the masked area) or **outpaint** (edit everything *outside* it).
+3. Choose the output: **plate** — the masked region on a black or green void (clean a plate, or a local hires-fix for a bad face/hand — only the region is regenerated, everything else stays untouched); **crop** — only the masked region, at full or selected resolution, aspect-locked.
+4. The node's `mask` output feeds the ComfyUI inpaint conditioning (`set_cond_area` → the area you chose); run any H3 inpaint pass on the plate.
+5. **Chaotic H3 Composite Patch** pastes the AI-patched clip back onto the source video at the exact box — masked by the alpha `MASK` so the seam is whatever H3 painted.
+
+**Green-screen mode** — flip the node to `chroma`: it key-matches the backdrop color (`similarity` / `smooth` / `spill` sliders) and outputs an **RGBA `IMAGE`** + alpha **`MASK`** with a checkerboard preview — transparency visible right on the timeline. Feed the keyed character into a Mockup Editor **RGBA video layer**, keyframe a background behind them, and match lighting — no inpaint needed, the context does the work.
+
+### 5. Convert your existing workflow in one command
 
 `tools/build_workflow.py` rewires any **single-pass** H3 workflow into the Director graph — every loader/patch node kept byte-for-byte, discovery is link-driven (no hard-coded node ids):
 
@@ -203,8 +219,10 @@ vrma.py               VRAM probing, unload/clear cycle, auto chunk sizing
 engine.py             conditioning + I2VA keyframes + sampling + decode
 nodes.py              ComfyUI node classes
 mockup.py                Mockup Editor scene renderer (keyframes -> frames)
+video_edit.py            Video Edit: mask keyframes, plates, crop, chroma key, composite
 web/js/chaotic_director.js   the timeline editor widget
 web/js/chaotic_puppet.js     the Mockup Editor stage widget
+web/js/chaotic_video_edit.js the Video Edit widget (scrub, masks, chroma)
 tools/                workflow builder / verifier / smoke check
 workflows/            example workflow
 ```

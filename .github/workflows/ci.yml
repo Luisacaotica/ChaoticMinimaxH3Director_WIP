@@ -35,10 +35,10 @@ jobs:
           node-version: "20"
 
       - name: JS widget syntax check
-        run: node --check web/js/chaotic_director.js && node --check web/js/chaotic_puppet.js
+        run: node --check web/js/chaotic_director.js && node --check web/js/chaotic_puppet.js && node --check web/js/chaotic_video_edit.js
 
       - name: JS widget smoke tests (DOM-mocked constructors against saved state)
-        run: node tools/widget_smoke.js && node tools/puppet_smoke.js
+        run: node tools/widget_smoke.js && node tools/puppet_smoke.js && node tools/video_edit_smoke.js
 
       - name: JS widgets — every this.X() call resolves to a class method
         run: |
@@ -59,6 +59,7 @@ jobs:
                   print(label, '- all', len(calls), 'this.X() calls resolve')
           check_file('web/js/chaotic_director.js', 'class ChaoticDirectorEditor', 'Extension registration', 'chaotic_director.js')
           check_file('web/js/chaotic_puppet.js', 'class ChaoticPuppetEditor', 'Extension registration', 'chaotic_puppet.js')
+          check_file('web/js/chaotic_video_edit.js', 'class ChaoticVideoEdit', 'Extension registration', 'chaotic_video_edit.js')
           if failures:
               print('MISSING methods:')
               for f in failures:

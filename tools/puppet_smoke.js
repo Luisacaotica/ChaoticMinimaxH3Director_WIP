@@ -288,6 +288,33 @@ function check(name, cond, extra) {
   check("inspector builds with the ease dropdown", inspThrew === null, inspThrew ? inspThrew.message : "");
   ed.selectedId = null;
 
+  /* mouse recording (Cappuccino-style) */
+  ed.selectedId = "layer_hero";
+  ed.playhead = 0.0;
+  ed.toggleRec();
+  check("REC arms", ed._recArmed === true);
+  ed.toggleRecChannel("size");
+  check("size channel toggled", ed._recChannels.size === true);
+  /* a recorded take: down on the layer (center at key0), drag, release */
+  const heroKeysBefore = ed.layerById("layer_hero").keys.length;
+  ed._recStartPlayhead = 0.0;
+  ed.onStageDown({ clientX: 240, clientY: 270 });
+  ed._recStart = Date.now() - 100;  // sandbox performance.now() is Date.now(); simulate a take 100 ms in
+  ed.onStageMove({ clientX: 300, clientY: 280 });
+  ed.onStageMove({ clientX: 340, clientY: 300 });
+  ed.onStageUp();
+  const heroKeys = ed.layerById("layer_hero").keys;
+  const recKey = heroKeys.find(k => k.t >= 0.05 && k.t < 1);
+  check("recording wrote a key during the take", !!recKey && heroKeys.length > heroKeysBefore,
+    "keys=" + heroKeys.length + " t=" + heroKeys.map(k => k.t.toFixed(2)).join(","));
+  check("recorded take wrote the enabled channels", recKey && Math.abs(recKey.x - 0.375) < 0.001 && Math.abs(recKey.scale - 0.8) > 0.001,
+    "x=" + (recKey && recKey.x.toFixed(3)) + " scale=" + (recKey && recKey.scale.toFixed(3)));
+  check("recorded keys are linear ease", heroKeys.every(k => (k.ease || "linear") === "linear"));
+  check("REC still armed after the take", ed._recArmed === true && ed._recCapturing === false);
+  ed.toggleRec();
+  check("REC disarms", ed._recArmed === false);
+  ed.selectedId = null;
+
   /* fresh node path */
   (async () => {
     const NodeType2 = function () {

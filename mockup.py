@@ -238,6 +238,13 @@ class _VideoSource:
         self._cur_time = -1.0
         self._cur_frame = None
         self._done = False
+        # Chroma-keyed / alpha-bearing clips (ProRes 4444, PNG-in-MOV, ...) carry
+        # an alpha channel — decode it so transparency survives into the stage.
+        try:
+            fmt = stream.codec_context.format
+            self._has_alpha = bool(fmt) and "a" in getattr(fmt, "name", "")
+        except Exception:  # noqa: BLE001
+            self._has_alpha = False
 
     def frame_at(self, media_sec: float):
         """Nearest decoded frame at or before media_sec (may be None)."""
@@ -257,7 +264,7 @@ class _VideoSource:
                 break
         if self._cur_frame is None:
             return None
-        return self._cur_frame.to_ndarray(format="rgb24")
+        return self._cur_frame.to_ndarray(format="rgba" if self._has_alpha else "rgb24")
 
 
 class _SpriteCache:

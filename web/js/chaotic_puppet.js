@@ -165,6 +165,17 @@ class ChaoticPuppetEditor {
     this._peaks = null;
     this._audioBuf = null;
     this._audioReady = false;
+    /* mouse recording (Cappuccino-style): REC arms, the next drag on a layer
+       records a take, writing keys only for the enabled channels */
+    this._recArmed = false;
+    this._recCapturing = false;
+    this._recChannels = { pos: true, size: false, rot: false };
+    this._recStart = 0;
+    this._recStartPlayhead = 0;
+    this._recLastSample = 0;
+    this._recStartY = 0;
+    this._recBaseCenter = null;
+    this._recBaseScale = 1;
 
     this.sceneDataWidget = node.widgets.find(w => w.name === "scene_data");
     this.fpsWidget = node.widgets.find(w => w.name === "fps");
@@ -433,7 +444,16 @@ class ChaoticPuppetEditor {
     aspectDims.textContent = "";
     this.aspectDims = aspectDims;
     const btnClear = this.btn("✕ Layers", () => { this.state.layers = []; this.selectedId = null; this.commitChanges(); this.buildInspector(); });
-    toolbar.append(btnImg, btnVid, btnText, btnBg, aspectLab, ...aspectBtns, aspectDims, btnKey, btnDelKey, btnPlay, btnSave, btnLoad, btnClear);
+    /* mouse recording controls */
+    const btnRec = this.btn("● REC", () => this.toggleRec());
+    btnRec.className = "pup-btn";
+    this.recBtn = btnRec;
+    const recPos = this.btn("Pos", () => this.toggleRecChannel("pos"));
+    const recSize = this.btn("Size", () => this.toggleRecChannel("size"));
+    const recRot = this.btn("Rot", () => this.toggleRecChannel("rot"));
+    recPos.className = recSize.className = recRot.className = "pup-btn";
+    this.recChanBtns = { pos: recPos, size: recSize, rot: recRot };
+    toolbar.append(btnImg, btnVid, btnText, btnBg, aspectLab, ...aspectBtns, aspectDims, btnKey, btnDelKey, btnPlay, btnRec, recPos, recSize, recRot, btnSave, btnLoad, btnClear);
     this.wrapper.appendChild(toolbar);
 
     /* stage */
@@ -589,6 +609,7 @@ class ChaoticPuppetEditor {
     this.drawKeyStrip();
     this.buildAudioPanel();
     this.refreshAspectButtons();
+    recPos.classList.add("active");
     this.updateStatus("Compose layers on the stage. Select a layer, move the playhead, press Key, then drag/move to animate. Wire the IMAGE output into the Director's mockup input.");
   }
 
@@ -852,6 +873,37 @@ class ChaoticPuppetEditor {
     this.drawKeyStrip();
   }
 
+  /* ---------------- mouse recording ---------------- */
+  toggleRec() {
+    this._recArmed = !this._recArmed;
+    this._recCapturing = false;
+    this.recBtn.classList.toggle("active", this._recArmed);
+    this.recBtn.textContent = this._recArmed ? "■ STOP REC" : "● REC";
+    this.updateStatus(this._recArmed
+      ? "REC armed — select a layer, set the playhead to the take start, then drag on the stage. Recording only the enabled channels."
+      : "Recording off.");
+  }
+
+  toggleRecChannel(ch) {
+    this._recChannels[ch] = !this._recChannels[ch];
+    this.recChanBtns[ch].classList.toggle("active", this._recChannels[ch]);
+    const on = Object.keys(this._recChannels).filter(k => this._recChannels[k]);
+    this.updateStatus(`Recording channels: ${on.length ? on.join(", ") : "none — enable Pos/Size/Rot"}.`);
+  }
+
+  recordedProps(layer, px, py) {
+    /* Map the pointer to recorded values: position follows the cursor, scale
+       grows as you drag up, rotation spins around the layer's center. */
+    const [W, H] = this.stageSize();
+    const base = propsAt(layer, this._recStartPlayhead) || layer;
+    const nx = clamp(px / W, 0, 1);
+    const ny = clamp(py / H, 0, 1);
+    const scale = clamp(this._recBaseScale * (1 + (this._recStartY - py) / H), 0.02, 12);
+    const [cx0, cy0] = this._recBaseCenter || [base.x * W, base.y * H];
+    const rotation = Math.atan2(py - cy0, px - cx0) * 180 / Math.PI;
+    return { x: nx, y: ny, scale, rotation };
+  }
+
   /* ---------------- keyframes ---------------- */
   keyAtPlayhead(layer) {
     if (!layer) return null;
@@ -931,7 +983,19 @@ class ChaoticPuppetEditor {
       /* anchor to the layer's DRAWN position (interpolated), not the static default */
       const props = propsAt(layer, this.playhead) || { x: layer.x, y: layer.y };
       const [W, H] = this.stageSize();
-      this._drag = { layerId: layer.id, startX: px, startY: py, dx: props.x - px / W, dy: props.y - py / H };
+      /* nx/ny seed the move-dedup guard with the DRAWN position so the first
+         real move is processed (the old `_drag.nx || nx` fallback swallowed it) */
+      this._drag = { layerId: layer.id, startX: px, startY: py, dx: props.x - px / W, dy: props.y - py / H, nx: props.x, ny: props.y };
+      if (this._recArmed) {
+        this._recCapturing = true;
+        this._recStart = performance.now();
+        this._recStartPlayhead = this.playhead;
+        this._recLastSample = 0;
+        this._recStartY = py;
+        this._recBaseScale = props.scale;
+        this._recBaseCenter = [props.x * W, props.y * H];
+        this.updateStatus("Recording… drag to perform the motion (the playhead advances). Release to finish the take.");
+      }
     } else {
       this.selectedId = null;
       this.buildInspector();
@@ -955,6 +1019,24 @@ class ChaoticPuppetEditor {
     if (Math.abs(nx - (this._drag.nx || nx)) < 1e-9 && Math.abs(ny - (this._drag.ny || ny)) < 1e-9) return;
     this._drag.nx = nx;
     this._drag.ny = ny;
+    if (this._recCapturing) {
+      /* record a take: the playhead advances in real time, keys are written at
+         30 Hz with only the enabled channels taken from the pointer */
+      const now = performance.now();
+      const t = this._recStartPlayhead + (now - this._recStart) / 1000;
+      if (t - this._recLastSample >= 1 / 30) {
+        this._recLastSample = t;
+        this.setPlayhead(Math.min(t, this.durationSec));
+        const key = this.ensureKeyAtPlayhead(layer);
+        key.ease = "linear";
+        const rec = this.recordedProps(layer, px, py);
+        if (this._recChannels.pos) { key.x = rec.x; key.y = rec.y; }
+        if (this._recChannels.size) key.scale = rec.scale;
+        if (this._recChannels.rot) key.rotation = rec.rotation;
+        this.commitChanges();
+      }
+      return;
+    }
     const key = this.ensureKeyAtPlayhead(layer);  // auto-key only once a drag actually moves
     key.x = nx;
     key.y = ny;
@@ -963,7 +1045,13 @@ class ChaoticPuppetEditor {
     this.commitChanges();
   }
 
-  onStageUp() { this._drag = null; }
+  onStageUp() {
+    if (this._recCapturing) {
+      this._recCapturing = false;
+      this.updateStatus("Take recorded — REC is still armed: scrub back, pose, and record again, or press ■ STOP. Record Size/Rot separately for fast edits.");
+    }
+    this._drag = null;
+  }
 
   /* ---------------- playback ---------------- */
   togglePlay() {

@@ -1514,11 +1514,16 @@ class ChaoticDirectorEditor {
   onDragOver(e) {
     e.preventDefault();
     e.stopPropagation();
-    if (!e.dataTransfer || !e.dataTransfer.types.includes("Files")) return;
+    const dt = e.dataTransfer;
+    if (!dt) return;
+    const hasFiles = dt.types.includes("Files");
+    const hasLib = dt.types.includes("text/chaotic-lib");
+    if (!hasFiles && !hasLib) return;
     if (e.target && this.libraryPanel && this.libraryPanel.contains(e.target)) return;
     const rect = this.wrapper.getBoundingClientRect();
     const y = e.clientY - rect.top;
     const kind = this.trackForY(y) === "audio" ? "audio" : this.trackForY(y) === "video" ? "video" : "picture";
+    if (!hasFiles) return;  // library cards drop without a ghost preview
     if (!this._ghost || this._ghost.kind !== kind) {
       this._ghost = { kind, x0: 0, x1: 1 };
     }
@@ -1533,7 +1538,21 @@ class ChaoticDirectorEditor {
   onDrop(e) {
     e.preventDefault();
     e.stopPropagation();
-    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    const dt = e.dataTransfer;
+    const libId = dt ? dt.getData("text/chaotic-lib") : "";
+    if (libId) {
+      if (e.target && this.libraryPanel && this.libraryPanel.contains(e.target)) {
+        this._ghost = null;
+        return;
+      }
+      const { x } = this.getMousePos(e);
+      const sec = Math.max(0, this.secondsAt(x));
+      this._ghost = null;
+      this.placeRefOnTimeline(libId, sec);
+      this.updateStatus(`Library reference placed on the timeline at ${sec.toFixed(2)}s — drag its trim handles or the whole block to fine-tune.`);
+      return;
+    }
+    const files = Array.from((dt && dt.files) || []);
     if (e.target && this.libraryPanel && this.libraryPanel.contains(e.target)) {
       /* dropped onto the reference library → untimed ref */
       this._ghost = null;
@@ -1767,6 +1786,12 @@ class ChaoticDirectorEditor {
     untimed.forEach(ref => {
       const card = document.createElement("div");
       card.className = "chaotic-lib-card";
+      card.draggable = true;
+      card.title = "Drag onto the timeline to place it, or use Place ▸";
+      card.addEventListener("dragstart", e => {
+        e.dataTransfer.setData("text/chaotic-lib", ref.id);
+        e.dataTransfer.effectAllowed = "move";
+      });
       let thumb;
       if (ref.kind === "audio") {
         thumb = document.createElement("canvas");
@@ -1809,8 +1834,13 @@ class ChaoticDirectorEditor {
       const placeBtn = document.createElement("button");
       placeBtn.className = "chaotic-btn";
       placeBtn.textContent = "Place ▸";
-      placeBtn.title = "Place on the timeline at the playhead";
+      placeBtn.title = "Place on the timeline at the playhead (or drag the card onto the timeline)";
       placeBtn.addEventListener("click", () => this.placeRefOnTimeline(ref.id));
+      const suggestBtn = document.createElement("button");
+      suggestBtn.className = "chaotic-btn";
+      suggestBtn.textContent = "→ prompt";
+      suggestBtn.title = "Insert this reference's tag into the selected shot's prompt text";
+      suggestBtn.addEventListener("click", () => this.suggestToPrompt(ref.id));
       const del = document.createElement("button");
       del.className = "chaotic-btn danger";
       del.textContent = "✕";
@@ -1824,6 +1854,7 @@ class ChaoticDirectorEditor {
       card.appendChild(meta);
       card.appendChild(strength);
       card.appendChild(placeBtn);
+      card.appendChild(suggestBtn);
       card.appendChild(del);
       this.libraryGrid.appendChild(card);
     });
@@ -1843,17 +1874,35 @@ class ChaoticDirectorEditor {
     this.buildInspector();
   }
 
-  placeRefOnTimeline(id) {
+  placeRefOnTimeline(id, start) {
     const ref = this.refById(id);
     if (!ref) return;
-    const start = this.playhead != null ? Math.max(0, this.playhead) : 0;
+    const s = start != null ? Math.max(0, start) : (this.playhead != null ? Math.max(0, this.playhead) : 0);
     ref.timed = true;
-    ref.start = Math.max(0, Math.min(start, Math.max(0, this.duration - 0.5)));
+    ref.start = Math.max(0, Math.min(s, Math.max(0, this.duration - 0.5)));
     ref.duration = Math.max(ref.duration, 3);
     this.selectedType = "ref";
     this.selectedId = ref.id;
     this.commitChanges();
     this.buildInspector();
+  }
+
+  suggestToPrompt(refId) {
+    const ref = this.refById(refId);
+    if (!ref) return;
+    const tag = this.globalTags()[refId];
+    if (!tag) { this.updateStatus("This reference has no tag yet."); return; }
+    const shot = this.selectedType === "shot"
+      ? (this.state.shots || []).find(s => s.id === this.selectedId)
+      : null;
+    if (!shot) {
+      this.updateStatus(`Select a shot on the prompt track, then click → prompt again to insert ${tag}.`);
+      return;
+    }
+    shot.text = ((shot.text || "").replace(/\s+$/, "")) + " " + tag;
+    this.commitChanges();
+    this.buildInspector();
+    this.updateStatus(`Added ${tag} to the selected shot's prompt — the library ref now feeds that shot.`);
   }
 
   /* ---------------- scrub preview ---------------- */

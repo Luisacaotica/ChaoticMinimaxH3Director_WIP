@@ -29,6 +29,21 @@ from .engine import ChunkRenderer
 from .mockup import default_scene_json, parse_scene, render_scene
 from .prompt_assembly import assemble_chunk_prompt
 from .stitching import as_video_batch, stitch_chunks
+from .video_edit import (
+    VOID_COLORS,
+    build_masks,
+    checkerboard_preview,
+    chroma_key,
+    composite_patch,
+    crop_plate,
+    default_edit_json,
+    effective_mask,
+    load_video_file,
+    mask_bbox,
+    masked_plate,
+    overlay_preview,
+    parse_edit_data,
+)
 from .timeline import (
     assign_global_tags,
     default_timeline_json,
@@ -350,6 +365,158 @@ class ChaoticH3MockupEditor:
         )
 
 
+class ChaoticH3VideoEdit:
+    """Video editing assistant: keyframed masks (brush/rect), masked plates
+    (black/green void, full-frame or selection-crop), green-screen chroma keying
+    to RGBA, and inspectable previews.  It never renders with a diffusion model
+    itself — wire the plates into your existing H3 graph (or the Director) and
+    put the patched clip back with the ChaoticH3CompositePatch node.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "fps": ("INT", {"default": 24, "min": 1, "max": 120}),
+                "edit_data": (
+                    "STRING",
+                    {"default": default_edit_json(), "multiline": True, "hidden": True},
+                ),
+            },
+            "optional": {
+                "video": (
+                    "IMAGE",
+                    {
+                        "tooltip": (
+                            "The video to edit ([B,F,H,W,3] or [F,H,W,3]). "
+                            "When omitted, the widget's loaded file is used."
+                        ),
+                    },
+                ),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", "IMAGE", "INT", "INT", "INT", "INT", "STRING")
+    RETURN_NAMES = (
+        "images", "crop_images", "mask", "masked_preview",
+        "box_x", "box_y", "box_w", "box_h", "meta",
+    )
+    FUNCTION = "render"
+    CATEGORY = "Chaotic/H3 Director"
+    DESCRIPTION = (
+        "Keyframed mask + plate builder for video editing: brush/rect masks over "
+        "time, masked plates on a black/green void (full-frame or selection-crop), "
+        "green-screen chroma key to RGBA, and previews. Feed the plates into an H3 "
+        "graph, then composite the patch back with ChaoticH3CompositePatch."
+    )
+
+    def render(self, fps, edit_data, video=None):
+        import folder_paths  # noqa: PLC0415
+
+        edit = parse_edit_data(edit_data)
+        fps = max(1, min(120, int(fps)))
+        if video is not None:
+            vid = video.float()
+            if vid.dim() == 5:
+                vid = vid[0]
+            if vid.dim() != 4 or vid.shape[3] not in (3, 4):
+                raise ValueError(
+                    "Chaotic H3 Video Edit: `video` must be [B,F,H,W,C] or [F,H,W,C] "
+                    f"(got shape {tuple(video.shape)})"
+                )
+            vid = vid.detach().cpu()
+        elif edit.get("video_file"):
+            path = folder_paths.get_annotated_filepath(edit["video_file"])
+            vid = load_video_file(path)
+        else:
+            raise ValueError(
+                "Chaotic H3 Video Edit: wire a `video` input or load a file in the widget first."
+            )
+        F, H, W = vid.shape[0], vid.shape[1], vid.shape[2]
+        meta = {
+            "mode": edit["mode"],
+            "fps": fps,
+            "frames": F,
+            "width": W,
+            "height": H,
+        }
+
+        if edit["mode"] == "chroma":
+            rgba, alpha = chroma_key(
+                vid, edit["chroma"]["color"],
+                edit["chroma"]["similarity"], edit["chroma"]["smooth"], edit["chroma"]["spill"],
+            )
+            preview = checkerboard_preview(rgba)
+            meta.update({"note": "chroma keyed — RGBA IMAGE on `images`, alpha MASK on `mask`"})
+            return (
+                rgba, rgba, alpha, preview,
+                0, 0, W, H,
+                json.dumps(meta, ensure_ascii=False, indent=2),
+            )
+
+        masks = build_masks(edit, fps, F, H, W)
+        eff = effective_mask(masks, edit["edit"])
+        color = VOID_COLORS[edit["plate_color"]]
+        plate = masked_plate(vid, eff, color)
+        preview = overlay_preview(vid, eff)
+        box = mask_bbox(eff)
+        if box == (0, 0, 0, 0):
+            _log("WARNING: no masked region found — check the mask keyframes")
+        if edit["output"] == "crop" and box != (0, 0, 0, 0):
+            crop = crop_plate(plate, box, edit["crop_scale"], color)
+        else:
+            crop = plate
+        meta.update({
+            "edit": edit["edit"],
+            "plate_color": edit["plate_color"],
+            "output": edit["output"],
+            "crop_scale": edit["crop_scale"],
+            "outpaint": edit["outpaint"],
+            "crop_box": list(box),
+        })
+        return (
+            plate, crop, eff, preview,
+            box[0], box[1], box[2], box[3],
+            json.dumps(meta, ensure_ascii=False, indent=2),
+        )
+
+
+class ChaoticH3CompositePatch:
+    """Paste an AI-patched clip back onto the source video.
+
+    * Full-frame patches: box (0, 0, 0, 0) pastes over the whole frame.
+    * Cropped patches: pass the Video Edit node's box_x/y/w/h (its crop_box);
+      the patch is resized to that box.
+    * Wire the Video Edit node's `mask` output to only replace the edited
+      region; leave `mask` unwired to paste the entire patch (outpainting).
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "base": ("IMAGE",),
+                "patch": ("IMAGE",),
+                "box_x": ("INT", {"default": 0, "min": 0, "max": nodes.MAX_RESOLUTION}),
+                "box_y": ("INT", {"default": 0, "min": 0, "max": nodes.MAX_RESOLUTION}),
+                "box_w": ("INT", {"default": 0, "min": 0, "max": nodes.MAX_RESOLUTION}),
+                "box_h": ("INT", {"default": 0, "min": 0, "max": nodes.MAX_RESOLUTION}),
+            },
+            "optional": {
+                "mask": ("MASK",),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    FUNCTION = "composite"
+    CATEGORY = "Chaotic/H3 Director"
+
+    def composite(self, base, patch, box_x, box_y, box_w, box_h, mask=None):
+        out = composite_patch(base, patch, mask, (box_x, box_y, box_w, box_h))
+        _log(f"composited patch ({patch.shape[0]} frames) over {box_w}x{box_h} at ({box_x},{box_y})")
+        return (out,)
+
+
 class ChaoticPromptAssembler:
     """Inspect the exact prompts the Director would emit, without rendering."""
 
@@ -424,11 +591,15 @@ class ChaoticPromptAssembler:
 NODE_CLASS_MAPPINGS = {
     "ChaoticH3Director": ChaoticDirector,
     "ChaoticH3MockupEditor": ChaoticH3MockupEditor,
+    "ChaoticH3VideoEdit": ChaoticH3VideoEdit,
+    "ChaoticH3CompositePatch": ChaoticH3CompositePatch,
     "ChaoticH3PromptAssembler": ChaoticPromptAssembler,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "ChaoticH3Director": "Chaotic H3 Director (Timeline)",
     "ChaoticH3MockupEditor": "Chaotic H3 Mockup Editor",
+    "ChaoticH3VideoEdit": "Chaotic H3 Video Edit",
+    "ChaoticH3CompositePatch": "Chaotic H3 Composite Patch",
     "ChaoticH3PromptAssembler": "Chaotic H3 Prompt Assembler",
 }
