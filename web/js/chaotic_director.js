@@ -31,7 +31,11 @@ const AUDIO_MARKERS = ["fully_copy", "partially_copy", "reference", "weak_refere
 const HIDDEN = ["timeline_data"];
 
 const CSS = `
-.chaotic-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;color:#dcdcdc;font-size:11px}
+.chaotic-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:row;gap:0;width:100%;box-sizing:border-box;color:#dcdcdc;font-size:11px;min-height:400px}
+.chaotic-left{display:flex;flex-direction:column;gap:6px;width:300px;min-width:260px;max-width:360px;flex-shrink:0;overflow-y:auto;overflow-x:hidden;padding-right:8px;border-right:1px solid #2a2a2a;scrollbar-width:thin;scrollbar-color:#3c3c3c transparent}
+.chaotic-left::-webkit-scrollbar{width:5px}
+.chaotic-left::-webkit-scrollbar-thumb{background:#3c3c3c;border-radius:3px}
+.chaotic-right{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0;overflow:hidden}
 .chaotic-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0}
 .chaotic-btn{background:#232323;color:#ddd;border:1px solid #2e2e2e;border-radius:4px;padding:5px 9px;font-size:11px;cursor:pointer;display:flex;align-items:center;gap:5px;transition:background .15s,border-color .15s;font-family:inherit}
 .chaotic-btn:hover{background:#333;border-color:#555}
@@ -89,7 +93,7 @@ const CSS = `
 .chaotic-overlay .x{position:absolute;top:8px;right:10px;cursor:pointer;color:#888;font-size:14px;line-height:1;padding:2px}
 .chaotic-overlay .x:hover{color:#fff}
 /* scrub preview strip */
-.chaotic-preview-stage{position:relative;background:#000;border:1px solid #1c1c1c;border-radius:5px;height:118px;overflow:hidden;display:flex;align-items:center;justify-content:center;flex:none}
+.chaotic-preview-stage{position:relative;background:#000;border:1px solid #1c1c1c;border-radius:5px;height:180px;overflow:hidden;display:flex;align-items:center;justify-content:center;flex:none}
 .chaotic-preview-stage video{max-width:100%;max-height:100%;display:none;background:#000}
 .chaotic-preview-stage img{max-width:100%;max-height:100%;display:none;object-fit:contain;background:#000}
 .chaotic-preview-stage canvas.chaotic-preview-wave{width:100%;height:118px;display:none;background:#000;border-radius:4px}
@@ -486,6 +490,14 @@ class ChaoticDirectorEditor {
     this.wrapper = document.createElement("div");
     this.wrapper.className = "chaotic-wrap";
 
+    /* left sidebar — controls, project, library, inspector */
+    const leftPanel = document.createElement("div");
+    leftPanel.className = "chaotic-left";
+
+    /* right main area — preview + timeline */
+    const rightPanel = document.createElement("div");
+    rightPanel.className = "chaotic-right";
+
     /* toolbar */
     const toolbar = document.createElement("div");
     toolbar.className = "chaotic-toolbar";
@@ -507,7 +519,7 @@ class ChaoticDirectorEditor {
     const btnChunks = this.btn("Auto-chunk?", () => this.toggleChunkHint());
     toolbar.append(btnAddShot, btnImportImg, btnImportVid, btnImportAud, btnProject, btnLibrary,
                    btnIn, btnOut, btnClearRange, btnSave, btnLoad, btnCopy, btnChunks);
-    this.wrapper.appendChild(toolbar);
+    leftPanel.appendChild(toolbar);
 
     /* project panel */
     this.projectPanel = document.createElement("div");
@@ -532,11 +544,11 @@ class ChaoticDirectorEditor {
       this.recomputeSize();
     });
     this.buildLibraryPanel();
-    this.wrapper.appendChild(this.libraryPanel);
+    leftPanel.appendChild(this.libraryPanel);
 
     /* scrub preview strip */
     this.buildPreviewStrip();
-    this.wrapper.appendChild(this.previewPanel);
+    rightPanel.appendChild(this.previewPanel);
 
     /* timeline settings toolbar (snap / frame-second / overlap lock) */
     this.ttoolbar = document.createElement("div");
@@ -593,19 +605,20 @@ class ChaoticDirectorEditor {
     tHelp.title = "show the timeline keyboard shortcuts (? toggles)";
     tHelp.addEventListener("click", () => this.toggleShortcuts());
     this.ttoolbar.appendChild(tHelp);
-    this.wrapper.appendChild(this.ttoolbar);
+    rightPanel.appendChild(this.ttoolbar);
 
-    /* timeline viewport */
+    /* timeline viewport — fill remaining height */
     this.viewport = document.createElement("div");
     this.viewport.className = "chaotic-viewport";
+    this.viewport.style.flex = "1";
     this.canvas = document.createElement("canvas");
     this.canvas.className = "chaotic-canvas";
     this.ctx = this.canvas.getContext("2d");
     this.canvas.style.height = TIMELINE_H + "px";
     this.viewport.appendChild(this.canvas);
-    this.wrapper.appendChild(this.viewport);
+    rightPanel.appendChild(this.viewport);
 
-    /* inspector (collapsible, like the library) */
+    /* inspector (collapsible, in the left sidebar) */
     this.inspector = document.createElement("div");
     this.inspector.className = "chaotic-collapse";
     this.inspector.innerHTML = `
@@ -616,16 +629,18 @@ class ChaoticDirectorEditor {
       this.recomputeSize();
     });
     this.inspBody = this.inspector.querySelector(".chaotic-collapse-body");
-    this.wrapper.appendChild(this.inspector);
+    leftPanel.appendChild(this.inspector);
 
     /* status line */
     this.statusLine = document.createElement("div");
     this.statusLine.className = "chaotic-statusline";
-    this.wrapper.appendChild(this.statusLine);
+    leftPanel.appendChild(this.statusLine);
     this.wrapper.style.position = "relative";
     this.helpOverlay = this.buildShortcutsOverlay();
     this.wrapper.appendChild(this.helpOverlay);
 
+    this.wrapper.appendChild(leftPanel);
+    this.wrapper.appendChild(rightPanel);
     this.container.appendChild(this.wrapper);
 
     /* tooltip */

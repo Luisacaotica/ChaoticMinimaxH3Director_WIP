@@ -39,7 +39,11 @@ const KEYSTRIP_GUTTER = 54;    // name column on the left of the strip
 const AUDIO_H = 84;
 
 const CSS = `
-.pup-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;color:#dcdcdc;font-size:11px}
+.pup-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:row;gap:0;width:100%;box-sizing:border-box;color:#dcdcdc;font-size:11px;min-height:400px}
+.pup-left{display:flex;flex-direction:column;gap:6px;width:300px;min-width:260px;max-width:360px;flex-shrink:0;overflow-y:auto;overflow-x:hidden;padding-right:8px;border-right:1px solid #2a2a2a;scrollbar-width:thin;scrollbar-color:#3c3c3c transparent}
+.pup-left::-webkit-scrollbar{width:5px}
+.pup-left::-webkit-scrollbar-thumb{background:#3c3c3c;border-radius:3px}
+.pup-right{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0;overflow:hidden}
 .pup-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0}
 .pup-btn{background:#232323;color:#ddd;border:1px solid #2e2e2e;border-radius:4px;padding:5px 9px;font-size:11px;cursor:pointer;display:flex;align-items:center;gap:5px;transition:background .15s,border-color .15s;font-family:inherit}
 .pup-btn:hover{background:#333;border-color:#555}
@@ -522,7 +526,15 @@ class ChaoticPuppetEditor {
     const btnHelp = this.btn("? Help", () => this.toggleShortcuts());
     btnHelp.title = "show the stage/keyframe keyboard shortcuts (? toggles)";
     toolbar.append(btnImg, btnVid, btnText, btnBg, aspectLab, ...aspectBtns, aspectDims, btnKey, btnDelKey, btnSnap, btnLib, btnPlay, btnRec, recPos, recSize, recRot, btnSave, btnLoad, btnClear, btnHelp);
-    this.wrapper.appendChild(toolbar);
+    /* left sidebar */
+    const leftPanel = document.createElement("div");
+    leftPanel.className = "pup-left";
+
+    /* right main — stage + key strip */
+    const rightPanel = document.createElement("div");
+    rightPanel.className = "pup-right";
+
+    leftPanel.appendChild(toolbar);
 
     /* stage */
     this.stageBox = document.createElement("div");
@@ -538,19 +550,20 @@ class ChaoticPuppetEditor {
     this.stageBox.appendChild(this.canvas);
     this.stageBox.appendChild(this.stageLabel);
     this.stageBox.appendChild(this.stageTime);
-    this.wrapper.appendChild(this.stageBox);
+    rightPanel.appendChild(this.stageBox);
 
     /* keyframe strip */
     this.keyCanvas = document.createElement("canvas");
     this.keyCanvas.className = "pup-keystrip";
+    this.keyCanvas.style.flex = "1";
     this.keyCtx = this.keyCanvas.getContext("2d");
-    this.wrapper.appendChild(this.keyCanvas);
+    rightPanel.appendChild(this.keyCanvas);
     const keyLegend = document.createElement("div");
     keyLegend.className = "pup-keystrip-legend";
     keyLegend.innerHTML = EASE_MODES.map(m =>
       `<span><span class="pup-ease-swatch" style="background:${EASE_COLORS[m]}"></span>${m}</span>`
     ).join("") + `<span style="margin-left:auto">each row = a layer (top = front) · ease colors the outgoing motion · click a row to select it</span>`;
-    this.wrapper.appendChild(keyLegend);
+    rightPanel.appendChild(keyLegend);
 
     /* layers panel */
     this.layersPanel = document.createElement("div");
@@ -564,7 +577,7 @@ class ChaoticPuppetEditor {
     this.layersList.style.alignItems = "stretch";
     this.layersPanel.appendChild(layersTitle);
     this.layersPanel.appendChild(this.layersList);
-    this.wrapper.appendChild(this.layersPanel);
+    leftPanel.appendChild(this.layersPanel);
 
     /* sprite library — every imported file, re-draggable onto the stage */
     this.libPanel = document.createElement("div");
@@ -579,13 +592,13 @@ class ChaoticPuppetEditor {
     this.libList.style.alignItems = "stretch";
     this.libPanel.appendChild(libTitle);
     this.libPanel.appendChild(this.libList);
-    this.wrapper.appendChild(this.libPanel);
+    leftPanel.appendChild(this.libPanel);
 
     /* inspector */
     this.inspector = document.createElement("div");
     this.inspector.className = "pup-panel";
     this.inspector.style.display = "none";
-    this.wrapper.appendChild(this.inspector);
+    leftPanel.appendChild(this.inspector);
 
     /* audio */
     this.audioPanel = document.createElement("div");
@@ -660,12 +673,12 @@ class ChaoticPuppetEditor {
     this.audioTrim.appendChild(outLab);
     this.audioTrim.appendChild(trimOut);
     this.audioPanel.appendChild(this.audioTrim);
-    this.wrapper.appendChild(this.audioPanel);
+    leftPanel.appendChild(this.audioPanel);
 
     /* background timeline */
     this.bgPanel = document.createElement("div");
     this.bgPanel.className = "pup-panel";
-    this.wrapper.appendChild(this.bgPanel);
+    leftPanel.appendChild(this.bgPanel);
     this.buildBgPanel();
 
     /* status */
@@ -673,9 +686,11 @@ class ChaoticPuppetEditor {
     this.statusLine.className = "pup-statusline";
     this.wrapper.style.position = "relative";
     this.helpOverlay = this.buildShortcutsOverlay();
-    this.wrapper.appendChild(this.helpOverlay);
-    this.wrapper.appendChild(this.statusLine);
+    leftPanel.appendChild(this.helpOverlay);
+    leftPanel.appendChild(this.statusLine);
 
+    this.wrapper.appendChild(leftPanel);
+    this.wrapper.appendChild(rightPanel);
     this.container.appendChild(this.wrapper);
 
     /* interactions */

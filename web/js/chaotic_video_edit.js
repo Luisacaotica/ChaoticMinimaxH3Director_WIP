@@ -18,13 +18,17 @@ const { api } = window.comfyAPI.api;
 const VE_GRID_DIV = 4;
 
 const VE_CSS = `
-.ve-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:column;gap:6px;width:100%;box-sizing:border-box;color:#dcdcdc;font-size:11px}
+.ve-wrap{font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;display:flex;flex-direction:row;gap:0;width:100%;box-sizing:border-box;color:#dcdcdc;font-size:11px;min-height:400px}
+.ve-left{display:flex;flex-direction:column;gap:6px;width:280px;min-width:240px;max-width:340px;flex-shrink:0;overflow-y:auto;overflow-x:hidden;padding-right:8px;border-right:1px solid #2a2a2a;scrollbar-width:thin;scrollbar-color:#3c3c3c transparent}
+.ve-left::-webkit-scrollbar{width:5px}
+.ve-left::-webkit-scrollbar-thumb{background:#3c3c3c;border-radius:3px}
+.ve-right{display:flex;flex-direction:column;gap:6px;flex:1;min-width:0;overflow:hidden}
 .ve-toolbar{display:flex;gap:6px;align-items:center;flex-wrap:wrap;padding:2px 0}
 .ve-btn{background:#232323;color:#ddd;border:1px solid #2e2e2e;border-radius:4px;padding:5px 9px;font-size:11px;cursor:pointer;display:flex;align-items:center;gap:5px;transition:background .15s,border-color .15s;font-family:inherit}
 .ve-btn:hover{background:#333;border-color:#555}
 .ve-btn.danger:hover{background:#4a1515;border-color:#cc4444;color:#ffb0b0}
 .ve-btn.active{background:#1c2b22;border-color:#2f7a50;color:#7ee2a8}
-.ve-preview-box{position:relative;background:#000;border:1px solid #1c1c1c;border-radius:6px;overflow:hidden;flex:none}
+.ve-preview-box{position:relative;background:#000;border:1px solid #1c1c1c;border-radius:6px;overflow:hidden;flex:none;min-height:300px}
 .ve-canvas{display:block;width:100%;cursor:crosshair;outline:none;background:#101214}
 .ve-time{position:absolute;top:4px;right:6px;font-size:10px;color:#ffd479;font-family:ui-monospace,Menlo,monospace;pointer-events:none;text-shadow:0 1px 2px #000}
 .ve-hint{position:absolute;top:4px;left:6px;font-size:9px;color:#888;font-family:ui-monospace,Menlo,monospace;pointer-events:none;text-shadow:0 1px 2px #000}
@@ -460,6 +464,14 @@ class ChaoticVideoEdit {
     this.wrapper = document.createElement("div");
     this.wrapper.className = "ve-wrap";
 
+    /* left sidebar — tools, panels */
+    const leftPanel = document.createElement("div");
+    leftPanel.className = "ve-left";
+
+    /* right main area — preview + key strip */
+    const rightPanel = document.createElement("div");
+    rightPanel.className = "ve-right";
+
     const toolbar = document.createElement("div");
     toolbar.className = "ve-toolbar";
     const btnLoad = this.btn("⬆ Video", () => this.pickVideo());
@@ -479,7 +491,7 @@ class ChaoticVideoEdit {
     const btnHelp = this.btn("? Help", () => this.toggleShortcuts());
     btnHelp.title = "show the editor keyboard shortcuts (? toggles)";
     toolbar.append(btnLoad, btnMode, btnPlay, btnMute, btnSave, btnLoadP, btnRef, btnHelp);
-    this.wrapper.appendChild(toolbar);
+    leftPanel.appendChild(toolbar);
 
     /* framerate row: the node's fps widget is the fixed latent rate — keep it
        in sync with the source file so mask key times line up */
@@ -492,13 +504,13 @@ class ChaoticVideoEdit {
     useFps.title = "set the node's fps widget to the source file's real framerate";
     fpsRow.appendChild(this.fpsInfo);
     fpsRow.appendChild(useFps);
-    this.wrapper.appendChild(fpsRow);
+    leftPanel.appendChild(fpsRow);
 
     /* copy-to-reference strip */
     this.refsRow = document.createElement("div");
     this.refsRow.className = "ve-refs";
     this.refsRow.style.display = "none";
-    this.wrapper.appendChild(this.refsRow);
+    leftPanel.appendChild(this.refsRow);
 
     /* preview */
     this.previewBox = document.createElement("div");
@@ -514,7 +526,7 @@ class ChaoticVideoEdit {
     this.previewBox.appendChild(this.canvas);
     this.previewBox.appendChild(this.previewHint);
     this.previewBox.appendChild(this.previewTime);
-    this.wrapper.appendChild(this.previewBox);
+    rightPanel.appendChild(this.previewBox);
 
     /* scrub + key strip */
     const scrubRow = document.createElement("div");
@@ -530,16 +542,17 @@ class ChaoticVideoEdit {
     this.timeLabel = timeLab;
     scrubRow.appendChild(this.seek);
     scrubRow.appendChild(timeLab);
-    this.wrapper.appendChild(scrubRow);
+    rightPanel.appendChild(scrubRow);
 
     this.keyCanvas = document.createElement("canvas");
     this.keyCanvas.className = "ve-strip";
+    this.keyCanvas.style.flex = "1";
     this.keyCtx = this.keyCanvas.getContext("2d");
-    this.wrapper.appendChild(this.keyCanvas);
+    rightPanel.appendChild(this.keyCanvas);
     const legend = document.createElement("div");
     legend.className = "ve-legend";
     legend.textContent = "mask keys (cross-faded) — set the playhead, draw, press Set Mask Key";
-    this.wrapper.appendChild(legend);
+    rightPanel.appendChild(legend);
 
     /* inpaint panel */
     this.inpaintPanel = document.createElement("div");
@@ -693,7 +706,7 @@ class ChaoticVideoEdit {
     promptIn.addEventListener("input", () => { this.state.prompt = promptIn.value; this.commitChanges(); });
     promptRow.appendChild(promptIn);
     this.inpaintPanel.appendChild(promptRow);
-    this.wrapper.appendChild(this.inpaintPanel);
+    leftPanel.appendChild(this.inpaintPanel);
 
     /* chroma panel */
     this.chromaPanel = document.createElement("div");
@@ -753,7 +766,7 @@ class ChaoticVideoEdit {
     chromaHint.className = "ve-hint";
     chromaHint.innerHTML = "How to use: <b>①</b> press <b>Sample</b> (or click the preview / <b>Detect</b> for auto) to pick the backing color — green, blue or any screen · <b>②</b> drag <b>Similarity + Smooth</b> until the subject looks clean on the checkerboard · <b>③</b> the <b>checkerboard = transparency</b>: the keyed foreground plate composites over any background (place it in the Director / Mockup). <b>Spill</b> removes color bleed. The plate output is the cut-out ready to composite — no inpainting needed here.";
     this.chromaPanel.appendChild(chromaHint);
-    this.wrapper.appendChild(this.chromaPanel);
+    leftPanel.appendChild(this.chromaPanel);
 
     /* reframe panel */
     this.reframePanel = document.createElement("div");
@@ -951,7 +964,7 @@ class ChaoticVideoEdit {
     rfHint.style.position = "static";
     rfHint.textContent = "the source fits inside the target window; the dimmed outside is the outpaint region. ✥ Move window: drag to place, the ⬤ knob rotates (Shift = 15°), the ◼ knob scales (0.1×–4×). Brush strokes = preserve (people/objects crossing the edge stay intact).";
     this.reframePanel.appendChild(rfHint);
-    this.wrapper.appendChild(this.reframePanel);
+    leftPanel.appendChild(this.reframePanel);
     this.refreshReframeUI();
 
     /* status */
@@ -959,9 +972,11 @@ class ChaoticVideoEdit {
     this.statusLine.className = "ve-statusline";
     this.wrapper.style.position = "relative";
     this.helpOverlay = this.buildShortcutsOverlay();
-    this.wrapper.appendChild(this.helpOverlay);
-    this.wrapper.appendChild(this.statusLine);
+    leftPanel.appendChild(this.helpOverlay);
+    leftPanel.appendChild(this.statusLine);
 
+    this.wrapper.appendChild(leftPanel);
+    this.wrapper.appendChild(rightPanel);
     this.container.appendChild(this.wrapper);
 
     /* interactions */
