@@ -60,6 +60,7 @@ const VE_CSS = `
 .ve-overlay .x:hover{color:#fff}
 .ve-track-prog-wrap{flex:1;height:6px;background:#101214;border:1px solid #262626;border-radius:3px;overflow:hidden;min-width:60px}
 .ve-track-prog{height:100%;width:0;background:#4aa47f;transition:width .1s}
+.ve-launch{display:flex;flex-direction:column;gap:6px;padding:8px;box-sizing:border-box}.ve-modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:99980}.ve-modal-backdrop.open{display:block}.ve-modal{display:none;position:fixed;inset:24px;z-index:99981;background:#151515;border:1px solid #444;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.7);padding:12px;box-sizing:border-box;overflow:auto}.ve-modal.open{display:flex;flex-direction:column;gap:10px}.ve-modal-head{display:flex;align-items:center;gap:8px}.ve-modal-title{font-size:14px;font-weight:700;color:#eee;margin-right:auto}.ve-modal-body{min-width:960px}
 `;
 
 if (!document.getElementById("chaotic-ve-styles")) {
@@ -2968,8 +2969,34 @@ class ChaoticVideoEdit {
     this._lastWidth = 0;
     this._lastScale = 0;
     if (this.domWidget && this.domWidget.computeSize) this.domWidget.computeSize();
+    if (this.domWidget && this.domWidget.growToFit) this.domWidget.growToFit();
     if (window.app && window.app.graph) window.app.graph.setDirtyCanvas(true, true);
   }
+
+  openModal() { if (this._openModal) this._openModal(); }
+  closeModal(save) { if (this._closeModal) this._closeModal(save); }
+  destroyModal() { if (this._destroyModal) this._destroyModal(); }
+}
+
+function setupVideoEditModal(editor, container) {
+  const button = document.createElement("button"); button.className = "ve-btn active"; button.textContent = "✂ Open Video Editor";
+  const summary = document.createElement("div"); summary.className = "ve-label";
+  const refresh = () => { summary.textContent = `${editor.state.mode} · ${editor.state.mask.keys.length} mask key${editor.state.mask.keys.length === 1 ? "" : "s"} · ${editor.state.video_file ? "video loaded" : "no video"}`; };
+  container.innerHTML = ""; container.className = "ve-launch"; container.append(button, summary); refresh();
+  const commit = editor.commitChanges.bind(editor); editor.commitChanges = (...args) => { const result = commit(...args); refresh(); return result; };
+  editor._openModal = () => {
+    if (!editor.modal) {
+      editor.backdrop = document.createElement("div"); editor.backdrop.className = "ve-modal-backdrop"; editor.modal = document.createElement("div"); editor.modal.className = "ve-modal";
+      const head = document.createElement("div"); head.className = "ve-modal-head"; const title = document.createElement("span"); title.className = "ve-modal-title"; title.textContent = "Chaotic H3 Video Editor";
+      const close = document.createElement("button"); close.className = "ve-btn"; close.textContent = "Close"; close.addEventListener("click", () => editor.closeModal(false)); const save = document.createElement("button"); save.className = "ve-btn active"; save.textContent = "Save & Close"; save.addEventListener("click", () => editor.closeModal(true));
+      head.append(title, close, save); editor.modalBody = document.createElement("div"); editor.modalBody.className = "ve-modal-body"; editor.modal.append(head, editor.modalBody); if (document.body) document.body.appendChild(editor.backdrop); if (document.body) document.body.appendChild(editor.modal);
+      editor._escHandler = e => { if (e.key === "Escape" && editor.modal.classList.contains("open")) editor.closeModal(true); }; if (document.addEventListener) document.addEventListener("keydown", editor._escHandler);
+    }
+    editor.modalBody.appendChild(editor.wrapper); editor.backdrop.classList.add("open"); editor.modal.classList.add("open"); editor._lastWidth = 0; editor._lastScale = 0; requestAnimationFrame(() => editor.checkResize());
+  };
+  editor._closeModal = save => { if (save) editor.commitChanges(); if (editor.modal) editor.modal.classList.remove("open"); if (editor.backdrop) editor.backdrop.classList.remove("open"); refresh(); };
+  editor._destroyModal = () => { if (editor._escHandler && document.removeEventListener) document.removeEventListener("keydown", editor._escHandler); if (editor.modal && editor.modal.remove) editor.modal.remove(); if (editor.backdrop && editor.backdrop.remove) editor.backdrop.remove(); };
+  button.addEventListener("click", () => editor.openModal());
 }
 
 /* ------------------------------------------------------------------ */
@@ -2986,7 +3013,7 @@ app.registerExtension({
 
       const container = document.createElement("div");
       container.style.width = "100%";
-      container.style.height = "100%";
+      container.style.height = "auto";
       container.style.boxSizing = "border-box";
 
       const widget = this.addDOMWidget("chaotic_video_edit", "chaotic_video_edit", container, {
@@ -2996,16 +3023,15 @@ app.registerExtension({
 
       const self = this;
       widget.computeSize = function (availableWidth) {
-        const width = Math.max(700, Number(availableWidth) || (self.size && self.size[0]) || 1100);
-        return [Math.max(10, width - 24), Math.round(width * 9 / 16) + 240];
+        const width = Math.max(320, Number(availableWidth) || (self.size && self.size[0]) || 400);
+        return [Math.max(10, width - 24), 64];
       };
 
       setTimeout(() => {
         try {
           self._videoEditEditor = new ChaoticVideoEdit(self, container, widget);
-          if (self.size && self.size[0] < 700) self.size = [1100, 760];
-          container.style.height = "100%";
-          widget.computeSize();
+          setupVideoEditModal(self._videoEditEditor, container);
+          if (typeof self.setSize === "function" && (!self.size || self.size[0] < 320)) self.setSize([400, 320]);
           self.setDirtyCanvas(true, true);
         } catch (err) {
           console.error("[ChaoticVideoEdit] init failed", err);
@@ -3015,14 +3041,14 @@ app.registerExtension({
       const onResize = nodeType.prototype.onResize;
       nodeType.prototype.onResize = function () {
         const result = onResize ? onResize.apply(this, arguments) : undefined;
-        if (this._videoEditEditor) requestAnimationFrame(() => this._videoEditEditor.recomputeSize());
+        if (this._videoEditEditor) { this._videoEditEditor._lastWidth = 0; this._videoEditEditor._lastScale = 0; }
         return result;
       };
 
       const onRemoved = nodeType.prototype.onRemoved;
       nodeType.prototype.onRemoved = function () {
         const editor = this._videoEditEditor;
-        if (editor && editor.wrapper) editor.wrapper.replaceChildren();
+        if (editor) editor.destroyModal();
         return onRemoved ? onRemoved.apply(this, arguments) : undefined;
       };
 

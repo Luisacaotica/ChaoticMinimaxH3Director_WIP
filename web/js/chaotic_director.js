@@ -146,6 +146,12 @@ const CSS = `
 .chaotic-tagmenu .chaotic-tagmenu-hint{color:#666;font-size:9px;font-family:inherit;cursor:default}
 .chaotic-tagmenu .chaotic-tagmenu-hint:hover{background:none;color:#666}
 .chaotic-edit-badge{display:inline-block;background:#7a3a1a;color:#ffb454;font-size:8px;font-weight:700;padding:0 3px;border-radius:3px;margin-left:4px;vertical-align:middle}
+.chaotic-launch{display:flex;flex-direction:column;gap:6px;padding:8px;box-sizing:border-box}
+.chaotic-modal-backdrop{display:none;position:fixed;inset:0;background:rgba(0,0,0,.72);z-index:99980}
+.chaotic-modal-backdrop.open{display:block}
+.chaotic-modal{display:none;position:fixed;inset:24px;z-index:99981;background:#151515;border:1px solid #444;border-radius:10px;box-shadow:0 20px 60px rgba(0,0,0,.7);padding:12px;box-sizing:border-box;overflow:auto}
+.chaotic-modal.open{display:flex;flex-direction:column;gap:10px}
+.chaotic-modal-head{display:flex;align-items:center;gap:8px;flex:none}.chaotic-modal-title{font-size:14px;font-weight:700;color:#eee;margin-right:auto}.chaotic-modal-body{min-width:960px;flex:none}
 `;
 
 if (!document.getElementById("chaotic-director-styles")) {
@@ -3175,8 +3181,42 @@ class ChaoticDirectorEditor {
 
   recomputeSize() {
     if (this.domWidget && this.domWidget.computeSize) this.domWidget.computeSize();
+    if (this.domWidget && this.domWidget.growToFit) this.domWidget.growToFit();
     if (window.app && window.app.graph) window.app.graph.setDirtyCanvas(true, true);
   }
+
+  openModal() { if (this._openModal) this._openModal(); }
+  closeModal(save) { if (this._closeModal) this._closeModal(save); }
+  destroyModal() { if (this._destroyModal) this._destroyModal(); }
+}
+
+function setupDirectorModal(editor, container) {
+  const launch = document.createElement("div"); launch.className = "chaotic-launch";
+  const button = document.createElement("button"); button.className = "chaotic-btn active"; button.textContent = "🎬 Open Timeline Editor";
+  const summary = document.createElement("div"); summary.className = "chaotic-hint";
+  const refresh = () => { summary.textContent = `${editor.state.shots.length} shot${editor.state.shots.length === 1 ? "" : "s"} · ${editor.duration.toFixed(1)}s · ${editor.state.refs.length} reference${editor.state.refs.length === 1 ? "" : "s"}`; };
+  container.innerHTML = ""; container.className = "chaotic-launch"; container.append(button, summary); refresh();
+  const originalCommit = editor.commitChanges.bind(editor);
+  editor.commitChanges = (...args) => { const result = originalCommit(...args); refresh(); return result; };
+  editor._openModal = () => {
+    if (!editor.modal) {
+      editor.backdrop = document.createElement("div"); editor.backdrop.className = "chaotic-modal-backdrop";
+      editor.modal = document.createElement("div"); editor.modal.className = "chaotic-modal";
+      const head = document.createElement("div"); head.className = "chaotic-modal-head";
+      const title = document.createElement("span"); title.className = "chaotic-modal-title"; title.textContent = "Chaotic H3 Timeline Editor";
+      const close = document.createElement("button"); close.className = "chaotic-btn"; close.textContent = "Close"; close.addEventListener("click", () => editor.closeModal(false));
+      const save = document.createElement("button"); save.className = "chaotic-btn active"; save.textContent = "Save & Close"; save.addEventListener("click", () => editor.closeModal(true));
+      head.append(title, close, save); editor.modalBody = document.createElement("div"); editor.modalBody.className = "chaotic-modal-body"; editor.modal.append(head, editor.modalBody);
+      if (document.body) document.body.appendChild(editor.backdrop); if (document.body) document.body.appendChild(editor.modal);
+      editor._escHandler = e => { if (e.key === "Escape" && editor.modal.classList.contains("open")) editor.closeModal(true); };
+      if (document.addEventListener) document.addEventListener("keydown", editor._escHandler);
+    }
+    editor.modalBody.appendChild(editor.wrapper); editor.backdrop.classList.add("open"); editor.modal.classList.add("open");
+    editor._lastWidth = 0; editor._lastScale = 0; requestAnimationFrame(() => editor.checkResize());
+  };
+  editor._closeModal = save => { if (save) editor.commitChanges(); if (editor.modal) editor.modal.classList.remove("open"); if (editor.backdrop) editor.backdrop.classList.remove("open"); refresh(); };
+  editor._destroyModal = () => { if (editor._escHandler && document.removeEventListener) document.removeEventListener("keydown", editor._escHandler); if (editor.modal && editor.modal.remove) editor.modal.remove(); if (editor.backdrop && editor.backdrop.remove) editor.backdrop.remove(); };
+  button.addEventListener("click", () => editor.openModal());
 }
 
 /* ------------------------------------------------------------------ */
@@ -3193,7 +3233,7 @@ app.registerExtension({
 
       const container = document.createElement("div");
       container.style.width = "100%";
-      container.style.height = "100%";
+      container.style.height = "auto";
       container.style.boxSizing = "border-box";
 
       const widget = this.addDOMWidget("chaotic_timeline", "chaotic_timeline", container, {
@@ -3203,21 +3243,16 @@ app.registerExtension({
 
       const self = this;
       widget.computeSize = function (availableWidth) {
-        const width = Math.max(700, Number(availableWidth) || (self.size && self.size[0]) || 1100);
-        const inspectorH = self._chaoticEditor && self._chaoticEditor.inspector.classList.contains("open") ? 330 : 0;
-        const projectH = self._chaoticEditor && self._chaoticEditor.projectPanel.classList.contains("open") ? 560 : 36;
-        const libraryH = self._chaoticEditor && self._chaoticEditor.libraryPanel && self._chaoticEditor.libraryPanel.classList.contains("open")
-          ? 180 : 40;
-        return [Math.max(10, width - 24), TIMELINE_H + 120 + PREVIEW_H + inspectorH + projectH + libraryH];
+        const width = Math.max(320, Number(availableWidth) || (self.size && self.size[0]) || 400);
+        return [Math.max(10, width - 24), 64];
       };
 
       /* init editor after widgets are finalized */
       setTimeout(() => {
         try {
           self._chaoticEditor = new ChaoticDirectorEditor(self, container, widget);
-          if (self.size && self.size[0] < 700) self.size = [1100, 720];
-          container.style.height = "100%";
-          widget.computeSize();
+          setupDirectorModal(self._chaoticEditor, container);
+          if (typeof self.setSize === "function" && (!self.size || self.size[0] < 320)) self.setSize([400, 320]);
           self.setDirtyCanvas(true, true);
         } catch (err) {
           console.error("[ChaoticDirector] init failed", err);
@@ -3227,14 +3262,14 @@ app.registerExtension({
       const onResize = nodeType.prototype.onResize;
       nodeType.prototype.onResize = function () {
         const result = onResize ? onResize.apply(this, arguments) : undefined;
-        if (this._chaoticEditor) requestAnimationFrame(() => this._chaoticEditor.recomputeSize());
+        if (this._chaoticEditor) { this._chaoticEditor._lastWidth = 0; this._chaoticEditor._lastScale = 0; }
         return result;
       };
 
       const onRemoved = nodeType.prototype.onRemoved;
       nodeType.prototype.onRemoved = function () {
         const editor = this._chaoticEditor;
-        if (editor && editor.wrapper) editor.wrapper.replaceChildren();
+        if (editor) editor.destroyModal();
         return onRemoved ? onRemoved.apply(this, arguments) : undefined;
       };
 
