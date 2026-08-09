@@ -3194,6 +3194,7 @@ app.registerExtension({
       const container = document.createElement("div");
       container.style.width = "100%";
       container.style.height = "100%";
+      container.style.boxSizing = "border-box";
 
       const widget = this.addDOMWidget("chaotic_timeline", "chaotic_timeline", container, {
         getValue: () => "",
@@ -3201,8 +3202,8 @@ app.registerExtension({
       });
 
       const self = this;
-      widget.computeSize = function () {
-        const width = Math.max(700, (self.size && self.size[0]) || 1100);
+      widget.computeSize = function (availableWidth) {
+        const width = Math.max(700, Number(availableWidth) || (self.size && self.size[0]) || 1100);
         const inspectorH = self._chaoticEditor && self._chaoticEditor.inspector.classList.contains("open") ? 330 : 0;
         const projectH = self._chaoticEditor && self._chaoticEditor.projectPanel.classList.contains("open") ? 560 : 36;
         const libraryH = self._chaoticEditor && self._chaoticEditor.libraryPanel && self._chaoticEditor.libraryPanel.classList.contains("open")
@@ -3222,6 +3223,20 @@ app.registerExtension({
           console.error("[ChaoticDirector] init failed", err);
         }
       }, 0);
+
+      const onResize = nodeType.prototype.onResize;
+      nodeType.prototype.onResize = function () {
+        const result = onResize ? onResize.apply(this, arguments) : undefined;
+        if (this._chaoticEditor) requestAnimationFrame(() => this._chaoticEditor.recomputeSize());
+        return result;
+      };
+
+      const onRemoved = nodeType.prototype.onRemoved;
+      nodeType.prototype.onRemoved = function () {
+        const editor = this._chaoticEditor;
+        if (editor && editor.wrapper) editor.wrapper.replaceChildren();
+        return onRemoved ? onRemoved.apply(this, arguments) : undefined;
+      };
 
       return r;
     };

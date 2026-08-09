@@ -2975,6 +2975,7 @@ app.registerExtension({
       const container = document.createElement("div");
       container.style.width = "100%";
       container.style.height = "100%";
+      container.style.boxSizing = "border-box";
 
       const widget = this.addDOMWidget("chaotic_video_edit", "chaotic_video_edit", container, {
         getValue: () => "",
@@ -2982,8 +2983,8 @@ app.registerExtension({
       });
 
       const self = this;
-      widget.computeSize = function () {
-        const width = Math.max(700, (self.size && self.size[0]) || 1100);
+      widget.computeSize = function (availableWidth) {
+        const width = Math.max(700, Number(availableWidth) || (self.size && self.size[0]) || 1100);
         return [Math.max(10, width - 24), Math.round(width * 9 / 16) + 240];
       };
 
@@ -2998,6 +2999,20 @@ app.registerExtension({
           console.error("[ChaoticVideoEdit] init failed", err);
         }
       }, 0);
+
+      const onResize = nodeType.prototype.onResize;
+      nodeType.prototype.onResize = function () {
+        const result = onResize ? onResize.apply(this, arguments) : undefined;
+        if (this._videoEditEditor) requestAnimationFrame(() => this._videoEditEditor.recomputeSize());
+        return result;
+      };
+
+      const onRemoved = nodeType.prototype.onRemoved;
+      nodeType.prototype.onRemoved = function () {
+        const editor = this._videoEditEditor;
+        if (editor && editor.wrapper) editor.wrapper.replaceChildren();
+        return onRemoved ? onRemoved.apply(this, arguments) : undefined;
+      };
 
       return r;
     };
