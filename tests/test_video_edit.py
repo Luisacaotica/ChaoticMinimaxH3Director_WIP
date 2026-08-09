@@ -16,6 +16,7 @@ from ChaoticMinimaxH3Director.video_edit import (
     composite_patch,
     crop_plate,
     default_edit_dict,
+    detect_key_color,
     effective_mask,
     mask_bbox,
     masked_plate,
@@ -240,6 +241,55 @@ def test_composite_rejects_mismatched_mask_frames():
     m = torch.zeros(3, 64, 96)   # 3 frames vs base 2 -> clear error, not silent
     with pytest.raises(ValueError, match="mask has 3 frames"):
         composite_patch(base, patch, m, (10, 10, 10, 10), use_mask=True)
+
+
+def test_detect_key_color_finds_dominant_backdrop():
+    # blue screen with a red subject in the middle
+    frame = torch.zeros(64, 96, 3)
+    frame[..., 2] = 1.0
+    frame[20:44, 30:66] = torch.tensor([0.9, 0.1, 0.1])
+    color, frac = detect_key_color(frame)
+    assert color[2] > 0.8 and color[0] < 0.2, color
+    assert frac > 0.5
+
+    # green screen
+    frame2 = torch.zeros(48, 64, 3)
+    frame2[..., 1] = 1.0
+    frame2[16:32, 20:44] = torch.tensor([0.2, 0.2, 0.8])
+    color2, frac2 = detect_key_color(frame2)
+    assert color2[1] > 0.8 and color2[2] < 0.3, color2
+    assert frac2 > 0.5
+
+    # magenta backdrop
+    frame3 = torch.zeros(48, 64, 3)
+    frame3[..., 0] = 1.0
+    frame3[..., 2] = 1.0
+    color3, _ = detect_key_color(frame3)
+    assert color3[0] > 0.8 and color3[2] > 0.8, color3
+
+    # 4D batch input -> first frame
+    color4, _ = detect_key_color(frame.unsqueeze(0))
+    assert color4[2] > 0.8, color4
+
+    # RGBA insurance — extra channel is sliced off, not a reshape crash
+    rgba = torch.cat([frame, torch.ones(64, 96, 1)], dim=-1)
+    color5, _ = detect_key_color(rgba)
+    assert color5[2] > 0.8, color5
+
+
+def test_parse_edit_data_preserves_chroma_auto():
+    d = parse_edit_data(json.dumps({
+        "mode": "chroma",
+        "chroma": {"color": [0, 0, 1], "similarity": 0.3, "smooth": 0.1, "spill": 0.2, "auto": True},
+    }))
+    assert d["chroma"]["auto"] is True
+    assert d["chroma"]["color"] == [0.0, 0.0, 1.0]
+    d2 = parse_edit_data(json.dumps({
+        "mode": "chroma",
+        "chroma": {"color": [0, 0, 1], "similarity": 0.3, "smooth": 0.1, "spill": 0.2},
+    }))
+    assert d2["chroma"]["auto"] is False
+    assert default_edit_dict()["chroma"]["auto"] is False
 
 
 def test_checkerboard_preview_shows_alpha():

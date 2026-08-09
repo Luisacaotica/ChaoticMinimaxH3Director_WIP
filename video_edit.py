@@ -63,7 +63,7 @@ def default_edit_dict() -> Dict[str, Any]:
         "prompt": "",
         "video_file": "",
         "mask": {"type": "rect", "keys": []},
-        "chroma": {"color": [0.0, 1.0, 0.0], "similarity": 0.35, "smooth": 0.12, "spill": 0.15},
+        "chroma": {"color": [0.0, 1.0, 0.0], "similarity": 0.35, "smooth": 0.12, "spill": 0.15, "auto": False},
     }
 
 
@@ -126,6 +126,7 @@ def parse_edit_data(json_text: str) -> Dict[str, Any]:
             "similarity": min(0.95, max(0.0, _as_float(raw_chroma.get("similarity"), 0.35))),
             "smooth": min(0.5, max(0.0, _as_float(raw_chroma.get("smooth"), 0.12))),
             "spill": min(0.9, max(0.0, _as_float(raw_chroma.get("spill"), 0.15))),
+            "auto": bool(raw_chroma.get("auto")),
         }
     return d
 
@@ -286,6 +287,42 @@ def _resize(t: torch.Tensor, h: int, w: int) -> torch.Tensor:
 # --------------------------------------------------------------------------- #
 # Chroma key
 # --------------------------------------------------------------------------- #
+
+
+def detect_key_color(
+    frame: torch.Tensor,
+    margin: float = 0.12,
+    bins: int = 6,
+) -> Tuple[List[float], float]:
+    """Dominant backing color of a frame -> ([r, g, b] 0..1, coverage fraction).
+
+    In a chroma setup the screen fills the frame's border ring, so the key color
+    is the most frequent quantized color among the outer `margin` of the frame
+    (mirrors `veDetectKeyColor` in web/js/chaotic_video_edit.js exactly — same
+    ring, same quantization, same first-max tie-break).  Works for green, blue,
+    magenta, or any other flat backdrop.
+    """
+    frame = frame.float()
+    if frame.dim() == 4:
+        frame = frame[0]
+    if frame.shape[-1] > 3:  # RGBA insurance — keying only needs RGB
+        frame = frame[..., :3]
+    h, w = int(frame.shape[0]), int(frame.shape[1])
+    mh = max(1, int(round(h * margin)))
+    mw = max(1, int(round(w * margin)))
+    border = torch.cat([
+        frame[:mh].reshape(-1, 3),    # top ring
+        frame[-mh:].reshape(-1, 3),   # bottom ring
+        frame[:, :mw].reshape(-1, 3),  # left ring
+        frame[:, -mw:].reshape(-1, 3),  # right ring
+    ])
+    q = (border * bins).floor().clamp(0, bins - 1).long()
+    idx = q[:, 0] * bins * bins + q[:, 1] * bins + q[:, 2]
+    counts = torch.bincount(idx, minlength=bins ** 3)
+    best = int(counts.argmax().item())
+    frac = float(counts[best].item() / max(1, idx.numel()))
+    color = border[idx == best].mean(dim=0).tolist()
+    return color, frac
 
 
 def chroma_key(

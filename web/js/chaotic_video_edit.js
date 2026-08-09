@@ -166,6 +166,45 @@ function veTranslateMask(mask, gw, gh, gdx, gdy) {
   return out;
 }
 
+function veDetectKeyColor(imageData, margin, bins) {
+  /* Dominant backing color of a frame's border ring (the screen fills the
+     edges in a chroma setup) -> { color: [r,g,b] 0..1, frac }. Mirrors
+     video_edit.py detect_key_color exactly: same ring, same quantization,
+     same first-max tie-break — green, blue, magenta, any flat backdrop. */
+  margin = margin || 0.12;
+  bins = bins || 6;
+  const w = imageData.width, h = imageData.height;
+  const d = imageData.data;
+  const mh = Math.max(1, Math.round(h * margin));
+  const mw = Math.max(1, Math.round(w * margin));
+  const nBins = bins * bins * bins;
+  const counts = new Uint32Array(nBins);
+  const sumR = new Float64Array(nBins), sumG = new Float64Array(nBins), sumB = new Float64Array(nBins);
+  const add = (x, y) => {
+    const i = (y * w + x) * 4;
+    const r = d[i] / 255, g = d[i + 1] / 255, b = d[i + 2] / 255;
+    const q = Math.min(bins - 1, Math.floor(r * bins)) * bins * bins
+      + Math.min(bins - 1, Math.floor(g * bins)) * bins
+      + Math.min(bins - 1, Math.floor(b * bins));
+    counts[q]++; sumR[q] += r; sumG[q] += g; sumB[q] += b;
+  };
+  for (let y = 0; y < mh; y++) for (let x = 0; x < w; x++) add(x, y);      // top ring
+  for (let y = h - mh; y < h; y++) for (let x = 0; x < w; x++) add(x, y);   // bottom ring
+  for (let x = 0; x < mw; x++) for (let y = 0; y < h; y++) add(x, y);       // left ring
+  for (let x = w - mw; x < w; x++) for (let y = 0; y < h; y++) add(x, y);   // right ring
+  let best = 0, bestN = counts[0];
+  for (let q = 1; q < nBins; q++) {
+    if (counts[q] > bestN) { bestN = counts[q]; best = q; }
+  }
+  if (bestN === 0) return { color: [0, 0, 0], frac: 0 };
+  let total = 0;
+  for (let q = 0; q < nBins; q++) total += counts[q];
+  return {
+    color: [sumR[best] / bestN, sumG[best] / bestN, sumB[best] / bestN],
+    frac: bestN / Math.max(1, total),
+  };
+}
+
 class ChaoticVideoEdit {
   constructor(node, container, domWidget) {
     this.node = node;
@@ -176,7 +215,7 @@ class ChaoticVideoEdit {
       version: 1, mode: "inpaint", edit: "inside", plate_color: "black",
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
       mask: { type: "rect", keys: [] },
-      chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15 },
+      chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
     };
     this.playhead = 0;
     this.playing = false;
@@ -217,7 +256,7 @@ class ChaoticVideoEdit {
     return JSON.parse(JSON.stringify({ version: 1, mode: "inpaint", edit: "inside", plate_color: "black",
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
       mask: { type: "rect", keys: [] },
-      chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15 } }));
+      chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false } }));
   }
 
   loadState() {
@@ -247,6 +286,7 @@ class ChaoticVideoEdit {
         similarity: veClamp(Number(raw.chroma && raw.chroma.similarity) || 0.35, 0, 0.95),
         smooth: veClamp(Number(raw.chroma && raw.chroma.smooth) || 0.12, 0, 0.5),
         spill: veClamp(Number(raw.chroma && raw.chroma.spill) || 0.15, 0, 0.9),
+        auto: !!(raw.chroma && raw.chroma.auto),
       },
     };
     if (raw.mask && Array.isArray(raw.mask.keys)) {
@@ -505,11 +545,34 @@ class ChaoticVideoEdit {
     colorIn.className = "ve-input";
     const hex = this.colorToHex(this.state.chroma.color);
     colorIn.value = /^#[0-9a-fA-F]{6}$/.test(hex) ? hex : "#00ff00";
-    colorIn.addEventListener("input", () => { this.state.chroma.color = this.hexToRgb(colorIn.value); this.commitChanges(); });
-    const sampleBtn = this.btn("Sample from frame", () => this.sampleColor());
+    colorIn.addEventListener("input", () => {
+      this.state.chroma.color = this.hexToRgb(colorIn.value);
+      this.state.chroma.auto = false;
+      this.refreshChromaUI();
+      this.commitChanges();
+    });
+    const sampleBtn = this.btn("Sample", () => this.sampleColor());
     colorRow.appendChild(colorIn);
     colorRow.appendChild(sampleBtn);
     this.chromaPanel.appendChild(colorRow);
+
+    /* screen presets (green / blue / magenta) + auto-detect */
+    const presetRow = document.createElement("div");
+    presetRow.className = "ve-row";
+    presetRow.appendChild(this.btnL("Screen"));
+    [["Green", [0, 1, 0]], ["Blue", [0, 0, 1]], ["Magenta", [1, 0, 1]]].forEach(([label, rgb]) => {
+      const b = this.btn(label, () => this.setChromaPreset(rgb));
+      b.title = "key color " + label + " screen";
+      presetRow.appendChild(b);
+    });
+    const autoBtn = this.btn("Auto", () => this.toggleChromaAuto());
+    autoBtn.title = "detect the dominant backing color from the video at render time";
+    this.autoBtn = autoBtn;
+    const detectBtn = this.btn("Detect", () => this.detectChromaColor(false));
+    detectBtn.title = "grab the most prominent border color from the current frame";
+    presetRow.appendChild(autoBtn);
+    presetRow.appendChild(detectBtn);
+    this.chromaPanel.appendChild(presetRow);
 
     const simRow = document.createElement("div");
     simRow.className = "ve-row";
@@ -550,6 +613,7 @@ class ChaoticVideoEdit {
 
     this.refreshModePanels();
     this.refreshToggleStates();
+    this.refreshChromaUI();
     this.drawPreview();
     this.drawKeyStrip();
     this.updateStatus("Load a video, scrub to a moment, draw the region, press Set Mask Key. Wire the plates into your H3 graph and composite the patch back.");
@@ -663,6 +727,8 @@ class ChaoticVideoEdit {
     this._gridW = Math.max(8, Math.round(vw / VE_GRID_DIV));
     this._gridH = Math.max(8, Math.round(vh / VE_GRID_DIV));
     this.updateStatus(`Video ${vw}×${vh} — mask grid ${this._gridW}×${this._gridH} (video/${VE_GRID_DIV}).`);
+    /* keep the preview in sync with the node's runtime auto-detect (frame 0) */
+    if (this.state.chroma.auto) this.detectChromaColor(true);
     this.drawPreview();
   }
 
@@ -1205,13 +1271,69 @@ class ChaoticVideoEdit {
       const img = this.ctx.getImageData(Math.round(W / 2), Math.round(H / 2), 1, 1);
       const d = img.data;
       this.state.chroma.color = [d[0] / 255, d[1] / 255, d[2] / 255];
-      const hex = this.colorToHex(this.state.chroma.color);
-      const picker = this.chromaPanel.querySelector('input[type="color"]');
-      if (picker) picker.value = hex;
+      this.state.chroma.auto = false;
+      this.refreshChromaUI();
       this.updateStatus("Key color sampled from the frame center — click again elsewhere if needed.");
       this.commitChanges();
     } catch (e) {
       this.updateStatus("Sampling failed — ensure the video is loaded.");
+    }
+  }
+
+  setChromaPreset(rgb) {
+    this.state.chroma.color = rgb.slice();
+    this.state.chroma.auto = false;
+    this.refreshChromaUI();
+    this.updateStatus("Key color: " + this.colorToHex(rgb) + " screen (auto off).");
+    this.commitChanges();
+  }
+
+  toggleChromaAuto() {
+    this.state.chroma.auto = !this.state.chroma.auto;
+    this.refreshChromaUI();
+    if (this.state.chroma.auto) {
+      this.updateStatus("Auto key color on — the node detects the dominant backing color at render time.");
+      this.detectChromaColor(true);
+    } else {
+      this.updateStatus("Auto key color off — using the picked color.");
+      this.commitChanges();
+    }
+  }
+
+  refreshChromaUI() {
+    if (this.autoBtn) this.autoBtn.classList.toggle("active", !!this.state.chroma.auto);
+    if (this.chromaPanel) {
+      const picker = this.chromaPanel.querySelector('input[type="color"]');
+      if (picker) picker.value = this.colorToHex(this.state.chroma.color);
+    }
+  }
+
+  async detectChromaColor(atZero) {
+    if (!this.videoEl || !this.videoEl.src || this.videoEl.readyState < 1) {
+      this.updateStatus("Load a video first, then Detect.");
+      return;
+    }
+    try {
+      const vw = this.videoEl.videoWidth || 1280, vh = this.videoEl.videoHeight || 720;
+      const dw = 320, dh = Math.max(8, Math.round(dw * vh / vw));
+      const off = document.createElement("canvas");
+      off.width = dw; off.height = dh;
+      const octx = off.getContext("2d", { willReadFrequently: true });
+      if (atZero && this.playhead > 0) await this.seekVideo(0);
+      octx.drawImage(this.videoEl, 0, 0, dw, dh);
+      const res = veDetectKeyColor(octx.getImageData(0, 0, dw, dh));
+      this.state.chroma.color = res.color;
+      this.refreshChromaUI();
+      const pct = Math.round(res.frac * 100);
+      this.updateStatus(
+        "Key color auto-detected: " + this.colorToHex(res.color) + " (" + pct + "% of the frame border)" +
+        (pct < 20 ? " — low coverage, is the backdrop flat?" : ".") +
+        (atZero ? " [frame 0]" : "")
+      );
+      this.commitChanges();
+      if (atZero && this.playhead > 0) this.setPlayhead(this.playhead);
+    } catch (e) {
+      this.updateStatus("Detection failed — " + (e && e.message ? e.message : e));
     }
   }
 

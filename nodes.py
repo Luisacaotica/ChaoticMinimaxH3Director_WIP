@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import copy
 import json
+from typing import Optional
 
 import comfy.samplers
 import nodes
@@ -37,6 +38,7 @@ from .video_edit import (
     composite_patch,
     crop_plate,
     default_edit_json,
+    detect_key_color,
     effective_mask,
     load_video_file,
     mask_bbox,
@@ -442,12 +444,26 @@ class ChaoticH3VideoEdit:
         }
 
         if edit["mode"] == "chroma":
+            color = edit["chroma"]["color"]
+            auto = bool(edit["chroma"].get("auto"))
+            coverage: Optional[float] = None
+            if auto and vid.shape[0] > 0:
+                color, coverage = detect_key_color(vid[0])
+                _log(
+                    f"auto key color {[round(c, 3) for c in color]} — "
+                    f"dominant on {coverage * 100:.0f}% of the frame border"
+                )
+                if coverage < 0.2:
+                    _log("WARNING: low key-color coverage — is the backdrop flat and consistent?")
             rgba, alpha = chroma_key(
-                vid, edit["chroma"]["color"],
+                vid, color,
                 edit["chroma"]["similarity"], edit["chroma"]["smooth"], edit["chroma"]["spill"],
             )
             preview = checkerboard_preview(rgba)
-            meta.update({"note": "chroma keyed — RGBA IMAGE on `images`, alpha MASK on `mask`"})
+            note = "chroma keyed — RGBA IMAGE on `images`, alpha MASK on `mask`"
+            if auto and coverage is not None:
+                note += f" | auto key color {color} ({coverage * 100:.0f}% coverage)"
+            meta.update({"note": note, "key_color": color, "auto": auto, "coverage": coverage})
             return (
                 rgba, rgba, alpha, preview,
                 0, 0, W, H,

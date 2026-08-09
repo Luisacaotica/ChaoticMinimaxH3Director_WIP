@@ -357,6 +357,45 @@ function check(name, cond, extra) {
   check("clearMaskKeys survives a null work mask and commits",
     clearThrew === null && ed.state.mask.keys.length === 0, clearThrew ? clearThrew.message : "");
 
+  /* ---- chroma: any screen color + auto-detect ---- */
+  function mkFrame(bg, subject) {
+    const dd = new Uint8ClampedArray(40 * 30 * 4);
+    for (let y = 0; y < 30; y++) for (let x = 0; x < 40; x++) {
+      const i = (y * 40 + x) * 4;
+      const c = (x >= 10 && x < 30 && y >= 8 && y < 22) ? subject : bg;
+      dd[i] = c[0]; dd[i + 1] = c[1]; dd[i + 2] = c[2]; dd[i + 3] = 255;
+    }
+    return { width: 40, height: 30, data: dd };
+  }
+  const blue = sandbox.veDetectKeyColor(mkFrame([20, 20, 235], [200, 40, 40]));
+  check("veDetectKeyColor finds a blue backdrop", blue.color[2] > 0.7 && blue.color[0] < 0.25 && blue.frac > 0.5,
+    "c=" + blue.color.map(v => v.toFixed(2)).join(",") + " frac=" + blue.frac.toFixed(2));
+  const magenta = sandbox.veDetectKeyColor(mkFrame([235, 20, 235], [40, 200, 40]));
+  check("veDetectKeyColor finds a magenta backdrop", magenta.color[0] > 0.7 && magenta.color[2] > 0.7 && magenta.color[1] < 0.25,
+    "c=" + magenta.color.map(v => v.toFixed(2)).join(","));
+  const solid = new Uint8ClampedArray(20 * 20 * 4);
+  for (let i = 0; i < 20 * 20 * 4; i += 4) { solid[i] = 0; solid[i + 1] = 255; solid[i + 2] = 0; solid[i + 3] = 255; }
+  const green = sandbox.veDetectKeyColor({ width: 20, height: 20, data: solid });
+  check("veDetectKeyColor green screen full coverage", green.color[1] > 0.9 && green.frac === 1, "g=" + green.color[1].toFixed(2));
+
+  ed.setChromaPreset([0, 0, 1]);
+  check("setChromaPreset sets blue + auto off",
+    ed.state.chroma.color[2] > 0.9 && ed.state.chroma.auto === false && ed.autoBtn.classList.contains("active") === false);
+  ed.videoEl.readyState = 1;   // the DOM mock never fires loadedmetadata
+  ed.videoEl.src = "mock://clip.mp4";   // satisfy the detect guard; ctx mock getImageData returns 1x1 black
+  ed.toggleChromaAuto();
+  check("toggleChromaAuto turns auto on", ed.state.chroma.auto === true && ed.autoBtn.classList.contains("active"));
+  let detThrew = null;
+  try { await ed.detectChromaColor(true); } catch (e) { detThrew = e; }
+  /* the DOM mock's frames are 1x1 black, so a run detection must overwrite the
+     preset blue with [0,0,0] — this proves the widget path really executed */
+  check("detectChromaColor ran and wrote the detected color",
+    detThrew === null && ed.state.chroma.color[0] === 0 && ed.state.chroma.color[1] === 0 && ed.state.chroma.color[2] === 0,
+    detThrew ? detThrew.message : "color=" + ed.state.chroma.color.join(","));
+  ed.toggleChromaAuto();
+  check("toggleChromaAuto turns auto off", ed.state.chroma.auto === false);
+  check("chroma auto serializes", JSON.parse(ed.serialize()).chroma.auto === false);
+
   /* fresh node path */
   (async () => {
     const NodeType2 = function () {
