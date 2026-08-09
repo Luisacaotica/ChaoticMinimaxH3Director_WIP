@@ -219,9 +219,11 @@ function check(name, cond, extra) {
   try { ed.drawPreview(); ed.drawKeyStrip(); } catch (e) { drawThrew = e; }
   check("drawPreview/drawKeyStrip do not throw", drawThrew === null, drawThrew ? drawThrew.message : "");
 
-  /* mode toggle */
+  /* mode toggle (inpaint -> chroma -> reframe -> inpaint) */
   ed.toggleMode();
   check("mode toggles to chroma", ed.state.mode === "chroma" && ed.chromaPanel.style.display !== "none");
+  ed.toggleMode();
+  check("mode toggles to reframe", ed.state.mode === "reframe" && ed.reframePanel.style.display !== "none");
   ed.toggleMode();
   check("mode toggles back to inpaint", ed.state.mode === "inpaint");
 
@@ -395,6 +397,33 @@ function check(name, cond, extra) {
   ed.toggleChromaAuto();
   check("toggleChromaAuto turns auto off", ed.state.chroma.auto === false);
   check("chroma auto serializes", JSON.parse(ed.serialize()).chroma.auto === false);
+
+  /* reframe mode + framerate + copy-to-reference */
+  ed.state.mode = "inpaint";
+  ed.toggleMode();  // -> chroma
+  ed.toggleMode();  // -> reframe
+  check("mode cycle reaches reframe", ed.state.mode === "reframe" && ed.modeBtn.textContent === "Mode: Reframe", "mode=" + ed.state.mode);
+  check("reframe panel visible", ed.reframePanel.style.display === "flex");
+  check("reframe defaults", ed.state.reframe.target_w === 1280 && ed.state.reframe.feather === 8 && ed.state.reframe.align_x === 0.5);
+  let rfThrew = null;
+  try { ed.setReframeTarget(720, 1280); ed.setReframeAlign("align_x", 0); } catch (e) { rfThrew = e; }
+  check("setReframeTarget/Align commit without throwing", rfThrew === null && ed.state.reframe.target_w === 720 && ed.state.reframe.align_x === 0, rfThrew ? rfThrew.message : "");
+  check("reframe serializes", JSON.parse(ed.serialize()).reframe.target_w === 720);
+  check("fps row shows the node fps", (ed.fpsInfo.textContent || "").indexOf("fps: node 24") === 0, ed.fpsInfo.textContent);
+  ed.setVideoFps(29.97);
+  check("fps mismatch flagged in the row", (ed.fpsInfo.textContent || "").indexOf("mismatch") !== -1, ed.fpsInfo.textContent);
+  ed.state.video_fps = null;
+  ed.checkFpsConsistency();
+  ed._selRect = null;
+  await ed.copyToReference();
+  check("copyToReference without a selection just warns", ed.state.refs.length === 0 && (ed.statusLine.textContent || "").indexOf("rectangle") !== -1, ed.statusLine.textContent);
+  ed._selRect = { x0: 0.1, y0: 0.2, x1: 0.4, y1: 0.5 };
+  ed.playhead = 1.25;
+  await ed.copyToReference();
+  check("copyToReference adds a ref crop", ed.state.refs.length === 1 && ed.state.refs[0].src.length > 0 && ed.state.refs[0].at === 1.25, "refs=" + ed.state.refs.length);
+  check("refs row renders a thumb", ed.refsRow.style.display === "flex" && ed.refsRow.children.length === 1);
+  ed.removeRef(0);
+  check("removeRef clears the strip", ed.state.refs.length === 0 && ed.refsRow.style.display === "none");
 
   /* fresh node path */
   (async () => {

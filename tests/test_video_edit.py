@@ -15,6 +15,7 @@ from ChaoticMinimaxH3Director.video_edit import (
     chroma_key,
     composite_patch,
     crop_plate,
+    decode_refs,
     default_edit_dict,
     detect_key_color,
     effective_mask,
@@ -22,6 +23,7 @@ from ChaoticMinimaxH3Director.video_edit import (
     masked_plate,
     overlay_preview,
     parse_edit_data,
+    reframe_plate,
 )
 
 
@@ -345,3 +347,81 @@ def test_composite_handles_5d_and_bad_frames():
         composite_patch(base[0], patch, None, (0, 0, 0, 0))
     out = composite_patch(base, _video(frames=2, value=0.9), None, (0, 0, 0, 0))
     assert out.dim() == 4
+
+
+def test_reframe_plate_vertical_to_horizontal():
+    # 32x64 vertical source -> 96x54 (16:9) target, centered, black void
+    vid = _video(frames=2, h=64, w=32, value=0.5)
+    rf = default_edit_dict()["reframe"]
+    rf.update({"target_w": 96, "target_h": 54, "feather": 8, "align_x": 0.5, "align_y": 0.5})
+    plate, eff, box = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
+    assert tuple(plate.shape) == (2, 54, 96, 3), plate.shape
+    assert tuple(eff.shape) == (2, 54, 96), eff.shape
+    x, y, w, h = box
+    assert w == 27 and h == 54, box  # 32/64 * 0.84375
+    assert x == 34 and y == 0, box
+    # source fills the window, void everywhere else
+    assert float(plate[0, 20, 40, 0]) > 0.45, "window should keep the source"
+    assert float(plate[0, 20, 10, 0]) < 0.05, "outside should be void"
+    # eff: 0 inside the window (kept), 1 outside (outpaint) — sample window center
+    assert float(eff[0, 27, 47]) < 0.1, "inside should not be outpainted"
+    assert float(eff[0, 20, 5]) > 0.9, "outside should be outpainted"
+
+
+def test_reframe_plate_align_and_preserve():
+    vid = _video(frames=2, h=64, w=32, value=0.5)
+    rf = default_edit_dict()["reframe"]
+    rf.update({"target_w": 96, "target_h": 54, "feather": 0, "align_x": 0.0, "align_y": 0.5})
+    plate, eff, box = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
+    assert box[0] == 0, "align_x=0 pins the window to the left edge"
+    # a brush stroke OUTSIDE the window preserves that spot (not outpainted)
+    preserve = torch.zeros(2, 64, 32)
+    preserve[:, 0:10, 0:10] = 1.0  # top-left of the source -> top-left of window
+    plate2, eff2, box2 = reframe_plate(vid, rf, (0.0, 0.0, 0.0), preserve)
+    assert box2 == box
+    assert float(eff2[0, 4, 4]) < 0.1, "preserved brush stroke must stay intact"
+    assert float(eff2[0, 20, 40]) > 0.9, "rest of the outside still outpaints"
+
+
+def test_reframe_plate_feather_softens_edge():
+    vid = _video(frames=1, h=16, w=8, value=0.5)
+    rf = default_edit_dict()["reframe"]
+    rf.update({"target_w": 24, "target_h": 24, "feather": 2, "align_x": 0.5, "align_y": 0.5})
+    _, eff, _ = reframe_plate(vid, rf, (0.0, 0.0, 0.0))
+    vals = sorted(float(v) for v in eff[0].unique().tolist())
+    assert len(vals) >= 3, "feathered edge should produce intermediate values"
+    assert vals[0] < 0.05 and vals[-1] > 0.95
+
+
+def test_parse_edit_data_reframe_refs_video_fps():
+    d = parse_edit_data(json.dumps({
+        "mode": "reframe",
+        "reframe": {"target_w": 1920, "target_h": 1080, "feather": 12, "align_x": 0, "align_y": 1},
+        "refs": [{"src": "QUJD", "at": 1.5}],
+        "video_fps": 29.97,
+    }))
+    assert d["mode"] == "reframe"
+    assert d["reframe"]["target_w"] == 1920 and d["reframe"]["feather"] == 12
+    assert d["reframe"]["align_x"] == 0.0 and d["reframe"]["align_y"] == 1.0
+    assert len(d["refs"]) == 1 and d["refs"][0]["src"] == "QUJD" and d["refs"][0]["at"] == 1.5
+    assert d["video_fps"] == 29.97
+    # clamps + defaults survive old scenes
+    d2 = parse_edit_data(json.dumps({"mode": "reframe", "reframe": {"feather": 999}}))
+    assert d2["reframe"]["feather"] == 64
+    d3 = parse_edit_data(json.dumps({"mode": "inpaint"}))
+    assert d3["reframe"]["target_w"] == 1280 and d3["refs"] == [] and d3["video_fps"] is None
+
+
+def test_decode_refs_roundtrip():
+    from PIL import Image
+
+    img = Image.new("RGB", (6, 4), (120, 40, 220))
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+    out = decode_refs([{"src": b64}, {"src": ""}, {"src": "not-base64!!"}])
+    assert len(out) == 1, "empty and corrupt entries are skipped"
+    assert tuple(out[0].shape) == (4, 6, 3)
+    r, g, b = out[0][2, 3].tolist()
+    assert abs(r - 120 / 255) < 0.02 and abs(g - 40 / 255) < 0.02 and abs(b - 220 / 255) < 0.02
+    assert decode_refs([]) == []

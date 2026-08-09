@@ -38,6 +38,10 @@ const VE_CSS = `
 .ve-input[type=text]{flex:1;min-width:60px}
 .ve-input[type=color]{width:34px;height:22px;padding:0;border:1px solid #333;background:#141414}
 .ve-input:focus{outline:none;border-color:#5a8f7a}
+.ve-refs{display:flex;gap:4px;flex-wrap:wrap;align-items:center;padding:2px 0}
+.ve-refcell{position:relative;flex:none}
+.ve-refcell img{width:64px;height:36px;object-fit:cover;border-radius:3px;background:#000;border:1px solid #2e2e2e}
+.ve-refdel{position:absolute;top:-6px;right:-6px;padding:0 4px;font-size:9px;min-width:16px}
 .ve-textarea{width:100%;height:52px;background:#141414;color:#e8e8e8;border:1px solid #333;border-radius:4px;padding:5px 6px;font-size:11px;line-height:1.4;box-sizing:border-box;resize:vertical;outline:none;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .ve-range{flex:1;accent-color:#4aa47f;height:4px;min-width:70px}
 .ve-legend{font-size:9px;color:#777;display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:2px 2px}
@@ -216,6 +220,9 @@ class ChaoticVideoEdit {
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
       mask: { type: "rect", keys: [] },
       chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
+      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5 },
+      refs: [],
+      video_fps: null,
     };
     this.playhead = 0;
     this.playing = false;
@@ -256,7 +263,10 @@ class ChaoticVideoEdit {
     return JSON.parse(JSON.stringify({ version: 1, mode: "inpaint", edit: "inside", plate_color: "black",
       output: "full", crop_scale: 1.0, outpaint: false, prompt: "", video_file: "",
       mask: { type: "rect", keys: [] },
-      chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false } }));
+      chroma: { color: [0, 1, 0], similarity: 0.35, smooth: 0.12, spill: 0.15, auto: false },
+      reframe: { target_w: 1280, target_h: 720, feather: 8, align_x: 0.5, align_y: 0.5 },
+      refs: [],
+      video_fps: null }));
   }
 
   loadState() {
@@ -289,6 +299,21 @@ class ChaoticVideoEdit {
         auto: !!(raw.chroma && raw.chroma.auto),
       },
     };
+    const rawRf = raw.reframe || {};
+    this.state.reframe = {
+      target_w: Math.max(16, Math.min(4096, parseInt(rawRf.target_w, 10) || 1280)),
+      target_h: Math.max(16, Math.min(4096, parseInt(rawRf.target_h, 10) || 720)),
+      feather: Math.max(0, Math.min(64, parseInt(rawRf.feather, 10) || 8)),
+      align_x: veClamp(Number(rawRf.align_x) || 0.5, 0, 1),
+      align_y: veClamp(Number(rawRf.align_y) || 0.5, 0, 1),
+    };
+    this.state.refs = Array.isArray(raw.refs)
+      ? raw.refs.filter(r => r && typeof r.src === "string" && r.src)
+        .map(r => ({ src: r.src, at: Number(r.at) || 0, note: typeof r.note === "string" ? r.note : "" }))
+      : [];
+    const vfps = Number(raw.video_fps);
+    this.state.video_fps = isFinite(vfps) && vfps >= 1 && vfps <= 240 ? vfps : null;
+    if (this.refsRow) this.renderRefsRow();
     if (raw.mask && Array.isArray(raw.mask.keys)) {
       raw.mask.keys.forEach(k => {
         if (!k || typeof k !== "object") return;
@@ -331,8 +356,30 @@ class ChaoticVideoEdit {
     const btnLoadP = this.btn("Load", () => this.loadProject());
     const btnPlay = this.btn("▶", () => this.togglePlay());
     this.playBtn = btnPlay;
-    toolbar.append(btnLoad, btnMode, btnPlay, btnSave, btnLoadP);
+    const btnRef = this.btn("⧉ Copy to ref", () => this.copyToReference());
+    btnRef.title = "copy the rectangle selection as a reference image (ref_images output)";
+    this.refBtn = btnRef;
+    toolbar.append(btnLoad, btnMode, btnPlay, btnSave, btnLoadP, btnRef);
     this.wrapper.appendChild(toolbar);
+
+    /* framerate row: the node's fps widget is the fixed latent rate — keep it
+       in sync with the source file so mask key times line up */
+    const fpsRow = document.createElement("div");
+    fpsRow.className = "ve-row";
+    this.fpsInfo = document.createElement("span");
+    this.fpsInfo.className = "ve-label";
+    this.fpsInfo.textContent = "fps: node " + this.fpsWidgetValue();
+    const useFps = this.btn("Use file fps", () => this.useFileFps());
+    useFps.title = "set the node's fps widget to the source file's real framerate";
+    fpsRow.appendChild(this.fpsInfo);
+    fpsRow.appendChild(useFps);
+    this.wrapper.appendChild(fpsRow);
+
+    /* copy-to-reference strip */
+    this.refsRow = document.createElement("div");
+    this.refsRow.className = "ve-refs";
+    this.refsRow.style.display = "none";
+    this.wrapper.appendChild(this.refsRow);
 
     /* preview */
     this.previewBox = document.createElement("div");
@@ -585,6 +632,77 @@ class ChaoticVideoEdit {
     this.chromaPanel.appendChild(simRow);
     this.wrapper.appendChild(this.chromaPanel);
 
+    /* reframe panel */
+    this.reframePanel = document.createElement("div");
+    this.reframePanel.className = "ve-panel";
+    this.reframePanel.style.display = "none";
+    const rfTitle = document.createElement("div");
+    rfTitle.className = "ve-panel-title";
+    rfTitle.innerHTML = "<span>Reframe (outpaint outside)</span>";
+    this.reframePanel.appendChild(rfTitle);
+
+    const aspectRow = document.createElement("div");
+    aspectRow.className = "ve-row";
+    aspectRow.appendChild(this.btnL("Aspect"));
+    [["9:16", 720, 1280], ["16:9", 1280, 720], ["4:3", 1024, 768], ["1:1", 1024, 1024], ["21:9", 1344, 576]].forEach(([label, w, h]) => {
+      const b = this.btn(label, () => this.setReframeTarget(w, h));
+      b.title = "target " + w + "×" + h;
+      aspectRow.appendChild(b);
+    });
+    this.reframePanel.appendChild(aspectRow);
+
+    const sizeRow = document.createElement("div");
+    sizeRow.className = "ve-row";
+    sizeRow.appendChild(this.btnL("Custom W"));
+    const wIn = document.createElement("input");
+    wIn.className = "ve-input"; wIn.type = "number"; wIn.min = "16"; wIn.max = "4096";
+    wIn.value = String(this.state.reframe.target_w);
+    wIn.addEventListener("change", () => this.setReframeTarget(Math.max(16, Math.min(4096, parseInt(wIn.value, 10) || 1280)), this.state.reframe.target_h));
+    const hIn = document.createElement("input");
+    hIn.className = "ve-input"; hIn.type = "number"; hIn.min = "16"; hIn.max = "4096";
+    hIn.value = String(this.state.reframe.target_h);
+    hIn.addEventListener("change", () => this.setReframeTarget(this.state.reframe.target_w, Math.max(16, Math.min(4096, parseInt(hIn.value, 10) || 720))));
+    this._rfWIn = wIn;
+    this._rfHIn = hIn;
+    sizeRow.appendChild(wIn);
+    sizeRow.appendChild(this.btnL("H"));
+    sizeRow.appendChild(hIn);
+    sizeRow.appendChild(this.btnL("Feather"));
+    const feather = document.createElement("input");
+    feather.className = "ve-range"; feather.type = "range"; feather.min = "0"; feather.max = "32"; feather.step = "1";
+    feather.value = String(this.state.reframe.feather);
+    feather.style.flex = "0 0 70px";
+    feather.addEventListener("input", () => { this.state.reframe.feather = Number(feather.value); feather.title = "feather: " + feather.value; this.commitChanges(); });
+    sizeRow.appendChild(feather);
+    this.reframePanel.appendChild(sizeRow);
+
+    const alignRow = document.createElement("div");
+    alignRow.className = "ve-row";
+    alignRow.appendChild(this.btnL("Align H"));
+    this.alignBtns = { align_x: {}, align_y: {} };
+    [["L", 0], ["C", 0.5], ["R", 1]].forEach(([label, v]) => {
+      const b = this.btn(label, () => this.setReframeAlign("align_x", v));
+      b.title = "horizontal placement " + (v === 0 ? "left" : v === 1 ? "right" : "center");
+      this.alignBtns.align_x[v] = b;
+      alignRow.appendChild(b);
+    });
+    alignRow.appendChild(this.btnL("V"));
+    [["T", 0], ["M", 0.5], ["B", 1]].forEach(([label, v]) => {
+      const b = this.btn(label, () => this.setReframeAlign("align_y", v));
+      b.title = "vertical placement " + (v === 0 ? "top" : v === 1 ? "bottom" : "middle");
+      this.alignBtns.align_y[v] = b;
+      alignRow.appendChild(b);
+    });
+    this.reframePanel.appendChild(alignRow);
+
+    const rfHint = document.createElement("div");
+    rfHint.className = "ve-hint";
+    rfHint.style.position = "static";
+    rfHint.textContent = "the source fits inside the target window; the dimmed outside is the outpaint region. Brush strokes = preserve (people/objects crossing the edge stay intact).";
+    this.reframePanel.appendChild(rfHint);
+    this.wrapper.appendChild(this.reframePanel);
+    this.refreshReframeUI();
+
     /* status */
     this.statusLine = document.createElement("div");
     this.statusLine.className = "ve-statusline";
@@ -729,6 +847,7 @@ class ChaoticVideoEdit {
     this.updateStatus(`Video ${vw}×${vh} — mask grid ${this._gridW}×${this._gridH} (video/${VE_GRID_DIV}).`);
     /* keep the preview in sync with the node's runtime auto-detect (frame 0) */
     if (this.state.chroma.auto) this.detectChromaColor(true);
+    this.measureFps();
     this.drawPreview();
   }
 
@@ -1134,6 +1253,13 @@ class ChaoticVideoEdit {
     if (!this._drawing) return;
     if (this._tool === "rect" && this._rectAnchor && this._lastNorm) {
       this.fillRectFromAnchor();
+      /* keep the selection for copy-to-reference */
+      const a = this._rectAnchor, p = this._lastNorm;
+      this._selRect = {
+        x0: Math.min(a.x, p.x), y0: Math.min(a.y, p.y),
+        x1: Math.max(a.x, p.x), y1: Math.max(a.y, p.y),
+      };
+      this.drawPreview();
     }
     this._drawing = false;
     this._rectAnchor = null;
@@ -1185,6 +1311,7 @@ class ChaoticVideoEdit {
       const dw = vw * s, dh = vh * s;
       const dx = (W - dw) / 2, dy = (H - dh) / 2;
       ctx.drawImage(this.videoEl, dx, dy, dw, dh);
+      this.drawSelectionOverlay(W, H);
     } else {
       ctx.fillStyle = "#333";
       ctx.font = "11px ui-monospace, monospace";
@@ -1197,18 +1324,29 @@ class ChaoticVideoEdit {
       this.drawChromaPreview(W, H);
       return;
     }
-    /* mask overlay (red) from the interpolated grid */
+    if (this.state.mode === "reframe") this.drawReframeFraming(W, H);
+    /* mask overlay (red) from the interpolated grid — mapped through the same
+       placement the render uses (the reframe window, or the canvas-centered
+       contain-fit otherwise) so strokes sit on the video */
     const interp = this.interpolatedMaskGrid(this.playhead);
     if (!interp && !this._workMask) return;
     const overlay = new Uint8ClampedArray(W * H);
     const gw = this._gridW, gh = this._gridH;
     const vw = this.videoEl.videoWidth || W, vh = this.videoEl.videoHeight || H;
-    const s = Math.min(W / vw, H / vh);
-    const ox = (W - vw * s) / 2, oy = (H - vh * s) / 2;
+    let ox, oy, pxPerGridX, pxPerGridY;
+    if (this.state.mode === "reframe") {
+      const w = this.reframeWindow(W, H);
+      ox = w.sx; oy = w.sy;
+      pxPerGridX = w.sw / gw; pxPerGridY = w.sh / gh;
+    } else {
+      const s = Math.min(W / vw, H / vh);
+      ox = (W - vw * s) / 2; oy = (H - vh * s) / 2;
+      pxPerGridX = (vw * s) / gw; pxPerGridY = (vh * s) / gh;
+    }
     for (let y = 0; y < H; y++) {
       for (let x = 0; x < W; x++) {
-        const gx = Math.floor((x - ox) / s / (vw / gw));
-        const gy = Math.floor((y - oy) / s / (vh / gh));
+        const gx = Math.floor((x - ox) / pxPerGridX);
+        const gy = Math.floor((y - oy) / pxPerGridY);
         if (gx < 0 || gy < 0 || gx >= gw || gy >= gh) continue;
         let v = 0;
         if (interp) v = interp.data[gy * gw + gx];
@@ -1375,24 +1513,253 @@ class ChaoticVideoEdit {
 
   /* ---------------- mode / option toggles ---------------- */
   toggleMode() {
-    this.state.mode = this.state.mode === "inpaint" ? "chroma" : "inpaint";
+    const order = ["inpaint", "chroma", "reframe"];
+    const i = order.indexOf(this.state.mode);
+    this.state.mode = order[(i + 1) % order.length];
     this.refreshModePanels();
     this.refreshToggleStates();
+    this.drawPreview();
     this.commitChanges();
   }
 
   refreshModePanels() {
-    if (!this.inpaintPanel || !this.chromaPanel) return;
+    if (!this.inpaintPanel || !this.chromaPanel || !this.reframePanel) return;
     this.inpaintPanel.style.display = this.state.mode === "inpaint" ? "flex" : "none";
     this.chromaPanel.style.display = this.state.mode === "chroma" ? "flex" : "none";
-    this.modeBtn.textContent = "Mode: " + (this.state.mode === "inpaint" ? "Inpaint" : "Chroma");
+    this.reframePanel.style.display = this.state.mode === "reframe" ? "flex" : "none";
+    const labels = { inpaint: "Inpaint", chroma: "Chroma", reframe: "Reframe" };
+    this.modeBtn.textContent = "Mode: " + (labels[this.state.mode] || "Inpaint");
     this.previewHint.textContent = this.state.mode === "inpaint"
       ? "draw the region — red = edited area"
-      : "green screen — transparent shows the checkerboard";
+      : this.state.mode === "chroma"
+        ? "green screen — transparent shows the checkerboard"
+        : "reframe — dimmed outside the target window gets outpainted";
   }
 
   setTool(t) { this._tool = t; this.refreshToggleStates(); }
   setEdit(e) { this.state.edit = e; this.refreshToggleStates(); this.commitChanges(); }
+
+  setReframeTarget(w, h) {
+    this.state.reframe.target_w = Math.max(16, Math.min(4096, parseInt(w, 10) || 1280));
+    this.state.reframe.target_h = Math.max(16, Math.min(4096, parseInt(h, 10) || 720));
+    this.refreshReframeUI();
+    this.drawPreview();
+    this.commitChanges();
+  }
+
+  setReframeAlign(axis, v) {
+    this.state.reframe[axis] = veClamp(Number(v), 0, 1);
+    this.refreshReframeUI();
+    this.drawPreview();
+    this.commitChanges();
+  }
+
+  refreshReframeUI() {
+    const rf = this.state.reframe;
+    if (this._rfWIn) this._rfWIn.value = String(rf.target_w);
+    if (this._rfHIn) this._rfHIn.value = String(rf.target_h);
+    if (this.alignBtns) {
+      Object.keys(this.alignBtns.align_x).forEach(k => this.alignBtns.align_x[k].classList.toggle("active", Number(k) === rf.align_x));
+      Object.keys(this.alignBtns.align_y).forEach(k => this.alignBtns.align_y[k].classList.toggle("active", Number(k) === rf.align_y));
+    }
+  }
+
+  /* reframe target window in preview coords (mirrors reframe_plate: contain + align) */
+  reframeWindow(W, H) {
+    const rf = this.state.reframe;
+    const tw = Math.max(1, rf.target_w), th = Math.max(1, rf.target_h);
+    const s = Math.min(W / tw, H / th);
+    const ww = tw * s, wh = th * s;
+    const wx = (W - ww) / 2, wy = (H - wh) / 2;
+    const vw = (this.videoEl && this.videoEl.videoWidth) || W;
+    const vh = (this.videoEl && this.videoEl.videoHeight) || H;
+    const sv = Math.min(ww / vw, wh / vh);
+    const sw = vw * sv, sh = vh * sv;
+    const sx = wx + (ww - sw) * (rf.align_x || 0.5);
+    const sy = wy + (wh - sh) * (rf.align_y || 0.5);
+    return { wx, wy, ww, wh, sx, sy, sw, sh };
+  }
+
+  drawReframeFraming(W, H) {
+    const w = this.reframeWindow(W, H);
+    const ctx = this.ctx;
+    ctx.save();
+    /* dim the outpaint region */
+    ctx.fillStyle = "rgba(8,10,12,0.72)";
+    ctx.fillRect(0, 0, W, w.wy);
+    ctx.fillRect(0, w.wy + w.wh, W, H - w.wy - w.wh);
+    ctx.fillRect(0, w.wy, w.wx, w.wh);
+    ctx.fillRect(w.wx + w.ww, w.wy, W - w.wx - w.ww, w.wh);
+    /* source video placed inside the window */
+    if (this.videoEl && this.videoEl.src && this.videoEl.readyState >= 1) {
+      ctx.drawImage(this.videoEl, w.sx, w.sy, w.sw, w.sh);
+    }
+    /* window border + label */
+    ctx.setLineDash([5, 4]);
+    ctx.strokeStyle = "#7ee2a8";
+    ctx.lineWidth = 1.5;
+    ctx.strokeRect(w.wx, w.wy, w.ww, w.wh);
+    ctx.setLineDash([]);
+    ctx.fillStyle = "#7ee2a8";
+    ctx.font = "10px ui-monospace, monospace";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText("reframe " + this.state.reframe.target_w + "×" + this.state.reframe.target_h + " — outside = outpaint", w.wx + 4, w.wy + 4);
+    ctx.restore();
+  }
+
+  drawSelectionOverlay(W, H) {
+    if (!this._selRect) return;
+    const vw = (this.videoEl && this.videoEl.videoWidth) || W;
+    const vh = (this.videoEl && this.videoEl.videoHeight) || H;
+    const s = Math.min(W / vw, H / vh);
+    const ox = (W - vw * s) / 2, oy = (H - vh * s) / 2;
+    const x0 = ox + this._selRect.x0 * vw * s;
+    const y0 = oy + this._selRect.y0 * vh * s;
+    const w = (this._selRect.x1 - this._selRect.x0) * vw * s;
+    const h = (this._selRect.y1 - this._selRect.y0) * vh * s;
+    if (w < 1 || h < 1) return;
+    this.ctx.save();
+    this.ctx.setLineDash([4, 3]);
+    this.ctx.strokeStyle = "#ffd479";
+    this.ctx.lineWidth = 1.2;
+    this.ctx.strokeRect(x0, y0, w, h);
+    this.ctx.setLineDash([]);
+    this.ctx.fillStyle = "rgba(255,212,121,0.9)";
+    this.ctx.font = "9px ui-monospace, monospace";
+    this.ctx.textAlign = "left";
+    this.ctx.textBaseline = "top";
+    this.ctx.fillText("ref region", x0 + 3, y0 + 3);
+    this.ctx.restore();
+  }
+
+  fpsWidgetValue() {
+    try {
+      const w = this.node && this.node.widgets && this.node.widgets.find(x => x.name === "fps");
+      return w ? Number(w.value) || 24 : 24;
+    } catch (e) { return 24; }
+  }
+
+  measureFps() {
+    const v = this.videoEl;
+    if (!v || typeof v.requestVideoFrameCallback !== "function") return;
+    const times = [];
+    const collect = (now, meta) => {
+      times.push(meta.mediaTime);
+      if (times.length >= 12) {
+        const span = times[11] - times[0];
+        const fps = span > 0.02 ? 11 / span : null;
+        if (fps && fps > 0.5 && fps < 240) this.setVideoFps(Math.round(fps * 100) / 100);
+        return;
+      }
+      v.requestVideoFrameCallback(collect);
+    };
+    v.requestVideoFrameCallback(collect);
+    if (v.paused) { try { v.play().then(() => v.pause()).catch(() => {}); } catch (e) {} }
+  }
+
+  setVideoFps(fps) {
+    this.state.video_fps = fps;
+    this.checkFpsConsistency();
+    this.commitChanges();
+  }
+
+  checkFpsConsistency() {
+    const nodeFps = this.fpsWidgetValue();
+    const fileFps = this.state.video_fps;
+    if (this.fpsInfo) {
+      this.fpsInfo.textContent = fileFps
+        ? "fps: node " + nodeFps + " | file ~" + fileFps + (Math.abs(nodeFps - fileFps) > 0.5 ? " ⚠ mismatch" : "")
+        : "fps: node " + nodeFps;
+    }
+    if (fileFps && Math.abs(nodeFps - fileFps) > 0.5) {
+      const cur = this.statusLine ? this.statusLine.textContent : "";
+      const msg = "⚠ framerate mismatch: file ~" + fileFps + " fps vs node " + nodeFps + " fps — press “Use file fps”.";
+      this.updateStatus(cur.indexOf("framerate mismatch") !== -1 ? cur : (cur ? cur + "  " : "") + msg);
+    }
+  }
+
+  useFileFps() {
+    const fps = this.state.video_fps;
+    if (!fps) { this.updateStatus("No file framerate measured yet."); return; }
+    try {
+      const w = this.node && this.node.widgets && this.node.widgets.find(x => x.name === "fps");
+      if (w) {
+        w.value = Math.round(fps);
+        if (window.app && window.app.graph) window.app.graph.setDirtyCanvas(true, true);
+      }
+    } catch (e) {}
+    this.checkFpsConsistency();
+    this.updateStatus("fps widget set to " + Math.round(fps) + " to match the file.");
+  }
+
+  async copyToReference() {
+    if (!this._selRect) {
+      this.updateStatus("Draw a rectangle first (Rect tool), then Copy to ref.");
+      return;
+    }
+    if (!this.videoEl || !this.videoEl.src || this.videoEl.readyState < 1) {
+      this.updateStatus("Load a video first.");
+      return;
+    }
+    try {
+      const vw = this.videoEl.videoWidth, vh = this.videoEl.videoHeight;
+      const x0 = Math.max(0, Math.round(this._selRect.x0 * vw));
+      const y0 = Math.max(0, Math.round(this._selRect.y0 * vh));
+      const x1 = Math.min(vw, Math.round(this._selRect.x1 * vw));
+      const y1 = Math.min(vh, Math.round(this._selRect.y1 * vh));
+      if (x1 - x0 < 4 || y1 - y0 < 4) {
+        this.updateStatus("Selection too small for a reference.");
+        return;
+      }
+      const needSeek = Math.abs(this.videoEl.currentTime - this.playhead) > 0.05;
+      if (needSeek) this.videoEl.currentTime = this.playhead;
+      await new Promise(res => {
+        const v = this.videoEl;
+        if (!v || !needSeek) { res(); return; }  // frame already at the playhead
+        v.addEventListener("seeked", res, { once: true });
+        setTimeout(res, 500);
+      });
+      const c = document.createElement("canvas");
+      c.width = x1 - x0; c.height = y1 - y0;
+      const ctx = c.getContext("2d");
+      ctx.drawImage(this.videoEl, x0, y0, c.width, c.height, 0, 0, c.width, c.height);
+      const b64 = c.toDataURL("image/png").split(",")[1] || "";
+      if (!b64) { this.updateStatus("Could not capture the frame (canvas tainted?)."); return; }
+      this.state.refs.push({ src: b64, at: Math.round(this.playhead * 100) / 100, note: "" });
+      this.renderRefsRow();
+      this.commitChanges();
+      this.updateStatus("Reference crop added (" + c.width + "×" + c.height + " @ " + this.playhead.toFixed(2) + "s) — wire `ref_images` into your H3 reference input.");
+    } catch (e) {
+      this.updateStatus("Copy to ref failed — " + (e && e.message ? e.message : e));
+    }
+  }
+
+  removeRef(i) {
+    this.state.refs.splice(i, 1);
+    this.renderRefsRow();
+    this.commitChanges();
+  }
+
+  renderRefsRow() {
+    if (!this.refsRow) return;
+    this.refsRow.innerHTML = "";
+    if (!this.state.refs.length) { this.refsRow.style.display = "none"; return; }
+    this.refsRow.style.display = "flex";
+    this.state.refs.forEach((r, i) => {
+      const cell = document.createElement("div");
+      cell.className = "ve-refcell";
+      const img = document.createElement("img");
+      img.src = "data:image/png;base64," + r.src;
+      img.title = "reference @ " + r.at + "s";
+      const del = this.btn("✕", () => this.removeRef(i));
+      del.className = "ve-btn ve-refdel";
+      del.title = "remove reference";
+      cell.appendChild(img);
+      cell.appendChild(del);
+      this.refsRow.appendChild(cell);
+    });
+  }
   setPlate(c) { this.state.plate_color = c; this.refreshToggleStates(); this.commitChanges(); }
   setOutput(o) { this.state.output = o; this.refreshToggleStates(); this.commitChanges(); }
 

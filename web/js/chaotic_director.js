@@ -1962,15 +1962,74 @@ class ChaoticDirectorEditor {
     this.previewTime = document.createElement("span");
     this.previewTime.className = "chaotic-preview-time";
     this.previewTime.textContent = "--:--.--- / --:--.---";
+    const copyRefBtn = this.btn("⧉ Copy to ref", () => this.copyPreviewToReference());
+    copyRefBtn.title = "copy the preview frame at the playhead into the reference library";
     controls.appendChild(this.previewPlayBtn);
     controls.appendChild(this.previewSeek);
     controls.appendChild(this.previewTime);
+    controls.appendChild(copyRefBtn);
     this.previewPanel.appendChild(controls);
 
     this.previewVideo.addEventListener("timeupdate", () => this.onPreviewTime());
     this.previewVideo.addEventListener("loadedmetadata", () => this.onPreviewMetadata());
     this.previewVideo.addEventListener("play", () => this.previewPlayBtn.classList.add("playing"));
     this.previewVideo.addEventListener("pause", () => this.previewPlayBtn.classList.remove("playing"));
+  }
+
+  copyPreviewToReference() {
+    const src = this.previewVideo && this.previewVideo.src && this.previewVideo.readyState >= 1
+      ? this.previewVideo
+      : (this.previewImg && this.previewImg.src && this.previewImg.naturalWidth > 0 ? this.previewImg : null);
+    if (!src) {
+      this.updateStatus("Scrub to a video or picture in the Preview first, then Copy to ref.");
+      return;
+    }
+    const at = Math.round(this.playhead * 100) / 100;
+    (async () => {
+      try {
+        const c = document.createElement("canvas");
+        const w = src.videoWidth || src.naturalWidth || 640;
+        const h = src.videoHeight || src.naturalHeight || 360;
+        c.width = w;
+        c.height = h;
+        c.getContext("2d").drawImage(src, 0, 0, w, h);
+        const dataUrl = c.toDataURL("image/png");
+        /* persist it like any imported picture: upload to ComfyUI, store the path */
+        let file = "";
+        let url = null;
+        if (typeof fetch === "function") {
+          const blob = await (await fetch(dataUrl)).blob();
+          const body = new FormData();
+          body.append("image", blob, "director_frame.png");
+          const resp = await api.fetchApi("/upload/image", { method: "POST", body });
+          if (resp.status === 200) {
+            const data = await resp.json();
+            const sub = data.subfolder || "";
+            file = sub ? sub + "/" + data.name : data.name;
+            url = api.apiURL(`/view?filename=${encodeURIComponent(data.name)}&type=input&subfolder=${encodeURIComponent(sub)}`);
+          }
+        }
+        const ref = this.normalizeRef({
+          id: uid("ref"),
+          kind: "picture",
+          file,
+          name: "frame @" + at + "s",
+          start: 0,
+          duration: 3,
+          tag_type: "picture",
+          role: "reference",
+          strength: 0.9,
+          timed: false,
+          thumb: url || dataUrl,
+        }, this.state.refs.length);
+        this.state.refs.push(ref);
+        this.commitChanges();
+        this.updateStatus("Preview frame copied to the reference library — its <Picture N> tag is auto-assigned and can be dragged into any prompt.");
+      } catch (err) {
+        console.error("[ChaoticDirector] copy to ref failed", err);
+        this.updateStatus("Copy to ref failed: " + (err && err.message ? err.message : err));
+      }
+    })();
   }
 
   previewRefForPlayhead(sec) {

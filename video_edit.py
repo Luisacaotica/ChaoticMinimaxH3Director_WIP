@@ -64,6 +64,17 @@ def default_edit_dict() -> Dict[str, Any]:
         "video_file": "",
         "mask": {"type": "rect", "keys": []},
         "chroma": {"color": [0.0, 1.0, 0.0], "similarity": 0.35, "smooth": 0.12, "spill": 0.15, "auto": False},
+        # reframe: outpaint the outside of a target canvas (e.g. 9:16 -> 16:9).
+        # align_x/align_y place the source window inside the target (0..1).
+        "reframe": {
+            "target_w": 1280,
+            "target_h": 720,
+            "feather": 8,
+            "align_x": 0.5,
+            "align_y": 0.5,
+        },
+        "refs": [],            # copy-to-reference crops: [{"src": b64png, "at": sec}]
+        "video_fps": None,     # the source file's real framerate (widget estimate)
     }
 
 
@@ -89,7 +100,7 @@ def parse_edit_data(json_text: str) -> Dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("Chaotic H3 Video Edit: edit_data must be a JSON object")
     d = default_edit_dict()
-    d["mode"] = data.get("mode") if data.get("mode") in ("inpaint", "chroma") else "inpaint"
+    d["mode"] = data.get("mode") if data.get("mode") in ("inpaint", "chroma", "reframe") else "inpaint"
     d["edit"] = data.get("edit") if data.get("edit") in ("inside", "outside") else "inside"
     d["plate_color"] = data.get("plate_color") if data.get("plate_color") in VOID_COLORS else "black"
     d["output"] = data.get("output") if data.get("output") in ("full", "crop") else "full"
@@ -128,6 +139,33 @@ def parse_edit_data(json_text: str) -> Dict[str, Any]:
             "spill": min(0.9, max(0.0, _as_float(raw_chroma.get("spill"), 0.15))),
             "auto": bool(raw_chroma.get("auto")),
         }
+    raw_rf = data.get("reframe")
+    if isinstance(raw_rf, dict):
+        d["reframe"] = {
+            "target_w": max(16, min(4096, int(_as_float(raw_rf.get("target_w"), 1280)))),
+            "target_h": max(16, min(4096, int(_as_float(raw_rf.get("target_h"), 720)))),
+            "feather": max(0, min(64, int(_as_float(raw_rf.get("feather"), 8)))),
+            "align_x": min(1.0, max(0.0, _as_float(raw_rf.get("align_x"), 0.5))),
+            "align_y": min(1.0, max(0.0, _as_float(raw_rf.get("align_y"), 0.5))),
+        }
+    raw_refs = data.get("refs")
+    if isinstance(raw_refs, list):
+        refs = []
+        for r in raw_refs:
+            if not isinstance(r, dict):
+                continue
+            src = r.get("src")
+            if not isinstance(src, str) or not src:
+                continue
+            refs.append({
+                "src": src,
+                "at": max(0.0, _as_float(r.get("at"), 0.0)),
+                "note": r.get("note") if isinstance(r.get("note"), str) else "",
+            })
+        d["refs"] = refs
+    vfps = _as_float(data.get("video_fps"), 0.0)
+    if 1.0 <= vfps <= 240.0:
+        d["video_fps"] = vfps
     return d
 
 
@@ -282,6 +320,90 @@ def _resize(t: torch.Tensor, h: int, w: int) -> torch.Tensor:
     return torch.nn.functional.interpolate(
         t.permute(0, 3, 1, 2), size=(h, w), mode="bilinear", align_corners=False
     ).permute(0, 2, 3, 1)
+
+
+def _feather_mask(mask: torch.Tensor, px: int) -> torch.Tensor:
+    """Soft ramp over a 0/1 mask boundary via a box blur (px >= 0)."""
+    px = max(0, int(px))
+    if px <= 0 or mask.numel() == 0:
+        return mask
+    m = mask.unsqueeze(1).float()  # [F, 1, H, W]
+    k = 2 * px + 1
+    m = torch.nn.functional.avg_pool2d(m, kernel_size=k, stride=1, padding=px, count_include_pad=False)
+    return m[:, 0]
+
+
+def reframe_plate(
+    video: torch.Tensor,
+    reframe: Dict[str, Any],
+    color: Tuple[float, float, float],
+    preserve: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor, Tuple[int, int, int, int]]:
+    """Reframe canvas: place the source inside a target-aspect canvas and
+    produce the outpaint mask (1 = outside the source window = to be outpainted).
+
+    `preserve` (optional [F, H, W] 0..1 in *source* coordinates) marks regions
+    that must NOT be outpainted even though they lie outside the window — brush
+    people/objects crossing the boundary so the model keeps them instead of
+    hallucinating over them.
+
+    Returns (plate [F, th, tw, 3], eff [F, th, tw], box (x, y, w, h) of the
+    placed source window in target coordinates).
+    """
+    video = video.float()
+    F, H, W = video.shape[0], video.shape[1], video.shape[2]
+    tw = max(16, int(reframe["target_w"]))
+    th = max(16, int(reframe["target_h"]))
+    feather = max(0, int(reframe["feather"]))
+    ax = min(1.0, max(0.0, float(reframe["align_x"])))
+    ay = min(1.0, max(0.0, float(reframe["align_y"])))
+
+    s = min(tw / W, th / H)  # contain-fit the source
+    sw, sh = max(1, int(round(W * s))), max(1, int(round(H * s)))
+    sx = int(round((tw - sw) * ax))
+    sy = int(round((th - sh) * ay))
+    # clamp so the window always stays inside the canvas
+    sx = min(max(0, sx), max(0, tw - sw))
+    sy = min(max(0, sy), max(0, th - sh))
+
+    void = torch.tensor(color, dtype=video.dtype, device=video.device).reshape(1, 1, 1, 3)
+    plate = void.expand(F, th, tw, 3).clone()
+    src = _resize(video, sh, sw)
+    plate[:, sy:sy + sh, sx:sx + sw, :] = src
+
+    # outside-of-window mask: 1 = outpaint region, 0 = keep
+    eff = torch.ones(F, th, tw, dtype=video.dtype, device=video.device)
+    eff[:, sy:sy + sh, sx:sx + sw] = 0.0
+    if preserve is not None:
+        p = preserve.float()[:F]  # truncate if longer; shorter stays and is skipped
+        if p.shape[0] == F:
+            p_resized = _resize(p.unsqueeze(-1), sh, sw)[..., 0]
+            placed = torch.zeros(F, th, tw, dtype=video.dtype, device=video.device)
+            placed[:, sy:sy + sh, sx:sx + sw] = p_resized
+            eff = eff * (1.0 - placed.clamp(0, 1))  # painted = preserved
+    eff = _feather_mask(eff, feather)
+    return plate, eff, (sx, sy, sw, sh)
+
+
+def decode_refs(refs: List[Dict[str, Any]]) -> List[torch.Tensor]:
+    """Copy-to-reference crops (base64 PNG strings) -> [N, H, W, 3] float 0..1.
+
+    Corrupt entries are skipped; an empty list means "no references".
+    """
+    from PIL import Image  # noqa: PLC0415
+
+    out: List[torch.Tensor] = []
+    for r in refs:
+        src = (r or {}).get("src") or ""
+        if not src:
+            continue
+        try:
+            img = Image.open(io.BytesIO(base64.b64decode(src))).convert("RGB")
+            arr = torch.from_numpy(__import__("numpy").asarray(img, dtype="float32")) / 255.0
+            out.append(arr)
+        except Exception:  # noqa: BLE001 — a bad crop must not kill the render
+            continue
+    return out
 
 
 # --------------------------------------------------------------------------- #

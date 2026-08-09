@@ -19,6 +19,7 @@ from typing import Optional
 
 import comfy.samplers
 import nodes
+import torch
 
 from .chunking import (
     align_frame_count,
@@ -37,6 +38,7 @@ from .video_edit import (
     chroma_key,
     composite_patch,
     crop_plate,
+    decode_refs,
     default_edit_json,
     detect_key_color,
     effective_mask,
@@ -45,6 +47,7 @@ from .video_edit import (
     masked_plate,
     overlay_preview,
     parse_edit_data,
+    reframe_plate,
 )
 from .timeline import (
     assign_global_tags,
@@ -398,18 +401,22 @@ class ChaoticH3VideoEdit:
             },
         }
 
-    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", "IMAGE", "INT", "INT", "INT", "INT", "STRING")
+    RETURN_TYPES = ("IMAGE", "IMAGE", "MASK", "IMAGE", "INT", "INT", "INT", "INT", "STRING", "IMAGE")
     RETURN_NAMES = (
         "images", "crop_images", "mask", "masked_preview",
-        "box_x", "box_y", "box_w", "box_h", "meta",
+        "box_x", "box_y", "box_w", "box_h", "meta", "ref_images",
     )
     FUNCTION = "render"
     CATEGORY = "Chaotic/H3 Director"
     DESCRIPTION = (
         "Keyframed mask + plate builder for video editing: brush/rect masks over "
         "time, masked plates on a black/green void (full-frame or selection-crop), "
-        "green-screen chroma key to RGBA, and previews. Feed the plates into an H3 "
-        "graph, then composite the patch back with ChaoticH3CompositePatch."
+        "reframe mode (outpaint the outside of a target aspect ratio — 9:16 to "
+        "16:9 and beyond, with brush-preserved edge crossings), green-screen chroma "
+        "key to RGBA, copy-to-reference region grabs on `ref_images`, and previews. "
+        "The fps widget is the fixed latent frame rate (default 24) — keep it in "
+        "sync with your source clip. Feed the plates into an H3 graph, then "
+        "composite the patch back with ChaoticH3CompositePatch."
     )
 
     def render(self, fps, edit_data, video=None):
@@ -435,13 +442,54 @@ class ChaoticH3VideoEdit:
                 "Chaotic H3 Video Edit: wire a `video` input or load a file in the widget first."
             )
         F, H, W = vid.shape[0], vid.shape[1], vid.shape[2]
+        vfps = edit.get("video_fps")
+        if vfps and abs(float(vfps) - fps) > 1.0:
+            _log(
+                f"WARNING: source video runs at ~{vfps:g} fps but the node renders at "
+                f"{fps} fps — mask key times will drift. Set the fps widget to match "
+                "the file, or re-encode the clip."
+            )
         meta = {
             "mode": edit["mode"],
             "fps": fps,
+            "video_fps": vfps,
             "frames": F,
             "width": W,
             "height": H,
         }
+        refs = decode_refs(edit.get("refs", []))
+        if refs:
+            ref_images = torch.stack(refs)
+            meta["ref_count"] = len(refs)
+            _log(f"copy-to-reference: {len(refs)} reference crop(s) on the `ref_images` output")
+        else:
+            ref_images = torch.zeros(1, 1, 1, 3)
+
+        if edit["mode"] == "reframe":
+            color = VOID_COLORS[edit["plate_color"]]
+            # painted strokes = preserve regions (people/objects crossing the edge)
+            preserve = effective_mask(build_masks(edit, fps, F, H, W), "inside")
+            plate, eff, box = reframe_plate(vid, edit["reframe"], color, preserve)
+            preview = overlay_preview(plate, eff)
+            meta.update({
+                "target_w": edit["reframe"]["target_w"],
+                "target_h": edit["reframe"]["target_h"],
+                "feather": edit["reframe"]["feather"],
+                "align_x": edit["reframe"]["align_x"],
+                "align_y": edit["reframe"]["align_y"],
+                "source_box": list(box),
+                "note": (
+                    "reframed canvas — outpaint the outside window (mask=1). "
+                    "Brush preserve strokes over people/objects crossing the edge. "
+                    "Composite the result back with ChaoticH3CompositePatch, box (0,0,tw,th)."
+                ),
+            })
+            return (
+                plate, plate, eff, preview,
+                box[0], box[1], box[2], box[3],
+                json.dumps(meta, ensure_ascii=False, indent=2),
+                ref_images,
+            )
 
         if edit["mode"] == "chroma":
             color = edit["chroma"]["color"]
@@ -468,6 +516,7 @@ class ChaoticH3VideoEdit:
                 rgba, rgba, alpha, preview,
                 0, 0, W, H,
                 json.dumps(meta, ensure_ascii=False, indent=2),
+                ref_images,
             )
 
         masks = build_masks(edit, fps, F, H, W)
@@ -494,6 +543,7 @@ class ChaoticH3VideoEdit:
             plate, crop, eff, preview,
             box[0], box[1], box[2], box[3],
             json.dumps(meta, ensure_ascii=False, indent=2),
+            ref_images,
         )
 
 
