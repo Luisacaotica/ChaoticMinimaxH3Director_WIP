@@ -1,3 +1,5 @@
+**Note: avoid using this for now, i'm focused on other stuffs.
+
 <div align="center">
 
 # 🎬 Chaotic MinimaxH3 Director
